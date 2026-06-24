@@ -55,6 +55,4 @@ Override with:
 DEVROOMS_HOME=/path/to/state DEVROOMS_ROOMS_ROOT=/path/to/rooms pnpm start
 ```
 
-## GitHub identity
 
-This repo is owned and authored as `sbbu`, not `sbbu-hermes` / `hermes`.
