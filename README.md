@@ -16,6 +16,11 @@ Devrooms currently ships as a daemon + web UI:
 - subagent/process launcher with presets for Hermes, Codex, Claude Code, and OpenCode
 - smoke coverage for project creation, room cloning, git operations, process launch, and websocket terminal attachment
 
+See:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/ROADMAP.md`](docs/ROADMAP.md)
+
 Electron/local Hermes Client integration comes next; the daemon and room model are the foundation.
 
 ## Quick start
@@ -37,6 +42,14 @@ Dev mode:
 ```bash
 pnpm dev
 ```
+
+Claude design critique pass, when Claude Code is installed/logged in:
+
+```bash
+pnpm run design:review
+```
+
+Review output is written under `docs/design-reviews/`.
 
 The daemon stores state at:
 

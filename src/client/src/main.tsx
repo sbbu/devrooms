@@ -231,6 +231,7 @@ function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
+  const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('terminal');
@@ -245,7 +246,7 @@ function App() {
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
   const projectRooms = useMemo(() => rooms.filter((room) => room.projectId === selectedProject?.id), [rooms, selectedProject]);
   const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId) ?? projectRooms[0], [rooms, selectedRoomId, projectRooms]);
-  const runningCount = 0;
+  const runningCount = roomProcesses.filter((proc) => proc.status === 'running').length;
 
   async function refresh() {
     const [projectData, presetData] = await Promise.all([
@@ -257,6 +258,18 @@ function App() {
     if (!selectedRoomId && projectData.rooms[0]) setSelectedRoomId(projectData.rooms[0].id);
   }
   useEffect(() => { refresh().catch((err) => setError(err.message)); }, []);
+
+  async function refreshRoomProcesses(roomId: string) {
+    const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
+    setRoomProcesses(data.processes);
+  }
+
+  useEffect(() => {
+    if (!selectedRoom) { setRoomProcesses([]); return; }
+    refreshRoomProcesses(selectedRoom.id).catch(() => undefined);
+    const timer = setInterval(() => refreshRoomProcesses(selectedRoom.id).catch(() => undefined), 3000);
+    return () => clearInterval(timer);
+  }, [selectedRoom?.id]);
 
   async function createProject() {
     setBusy(true); setError(null);
@@ -326,6 +339,7 @@ function App() {
             <span>{selectedProject?.name ?? 'no project'}</span>
             <span>{selectedRoom?.branch ?? selectedProject?.defaultBranch ?? 'no branch'}</span>
             <span>{runningCount} running</span>
+            <span>{roomProcesses.length} process{roomProcesses.length === 1 ? '' : 'es'}</span>
           </div>
           <nav>
             <button className={tab === 'terminal' ? 'active' : ''} onClick={() => setTab('terminal')}>terminal</button>
