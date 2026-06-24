@@ -5,8 +5,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
-type Project = { id: string; name: string; repoUrl: string; defaultBranch: string };
-type Room = { id: string; projectId: string; name: string; path: string; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string };
+type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
+type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number }; branches: string[]; head: string };
 type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited' | 'lost'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
@@ -60,7 +60,8 @@ function TerminalPane({ roomId, processId }: { roomId?: string; processId?: stri
   const hostRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!hostRef.current || (!roomId && !processId)) return;
+    const host = hostRef.current;
+    if (!host || (!roomId && !processId)) return;
     const term = new Terminal({
       cursorBlink: true,
       convertEol: true,
@@ -71,30 +72,40 @@ function TerminalPane({ roomId, processId }: { roomId?: string; processId?: stri
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(hostRef.current);
+    term.open(host);
     term.focus();
-    fit.fit();
     const socket = new WebSocket(wsUrl(processId ? `/ws/processes/${processId}` : `/ws/rooms/${roomId}/terminal`));
-    socket.addEventListener('open', () => {
+    const sendInput = (data: string) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: 'input', data }));
+    const fitAndResize = () => {
+      if (!host.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0) return;
       fit.fit();
-      socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    };
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey) {
+        sendInput('\n');
+        event.preventDefault();
+        return false;
+      }
+      return true;
+    });
+    socket.addEventListener('open', () => {
+      fitAndResize();
+      requestAnimationFrame(() => requestAnimationFrame(fitAndResize));
     });
     socket.addEventListener('message', (event) => {
       const msg = JSON.parse(event.data as string) as { type: string; data: string };
       if (msg.type === 'output') term.write(msg.data);
     });
     socket.addEventListener('close', () => term.writeln('\r\n[devrooms disconnected]'));
-    const disposable = term.onData((data) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: 'input', data })));
-    const onResize = () => {
-      fit.fit();
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    };
-    const observer = new ResizeObserver(onResize);
-    observer.observe(hostRef.current);
-    window.addEventListener('resize', onResize);
+    const disposable = term.onData(sendInput);
+    const observer = new ResizeObserver(() => requestAnimationFrame(fitAndResize));
+    observer.observe(host);
+    window.addEventListener('resize', fitAndResize);
+    requestAnimationFrame(() => requestAnimationFrame(fitAndResize));
     return () => {
       observer.disconnect();
-      window.removeEventListener('resize', onResize);
+      window.removeEventListener('resize', fitAndResize);
       disposable.dispose();
       socket.close();
       term.dispose();
@@ -192,7 +203,7 @@ function GitPanel({ room }: { room: Room }) {
 
 function SubagentsPanel({ room, presets }: { room: Room; presets: AgentPreset[] }) {
   const [processes, setProcesses] = useState<ManagedProcess[]>([]);
-  const [command, setCommand] = useState('hermes chat --tui --accept-hooks --pass-session-id');
+  const [command, setCommand] = useState('hermes chat --tui --source devrooms --accept-hooks --pass-session-id');
   const [name, setName] = useState('Hermes TUI');
   const [attached, setAttached] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -257,6 +268,7 @@ function App() {
   const [tab, setTab] = useState<Tab>('terminal');
   const [projectName, setProjectName] = useState('Devrooms');
   const [repoUrl, setRepoUrl] = useState('https://github.com/sbbu/devrooms.git');
+  const [projectPath, setProjectPath] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
   const [roomName, setRoomName] = useState('room-a');
   const [roomBranch, setRoomBranch] = useState('');
@@ -313,7 +325,7 @@ function App() {
   async function createProject() {
     setBusy(true); setError(null);
     try {
-      const data = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ name: projectName, repoUrl, defaultBranch }) });
+      const data = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ name: projectName, repoUrl: repoUrl || undefined, rootPath: projectPath || undefined, defaultBranch }) });
       setSelectedProjectId(data.project.id);
       await refresh();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -333,11 +345,12 @@ function App() {
 
   async function deleteSelectedRoom() {
     if (!selectedRoom) return;
-    const really = window.confirm(`Remove ${selectedRoom.name} from Devrooms and delete its files?`);
+    const deleteFiles = selectedRoom.kind !== 'main';
+    const really = window.confirm(deleteFiles ? `Remove ${selectedRoom.name} from Devrooms and delete its files?` : `Remove ${selectedRoom.name} from Devrooms? The main repo files will be left untouched.`);
     if (!really) return;
     setBusy(true); setError(null);
     try {
-      await api(`/api/rooms/${selectedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
+      await api(`/api/rooms/${selectedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles }) });
       setSelectedRoomId(null);
       await refresh();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -369,16 +382,17 @@ function App() {
           })}
           <div className="form-card">
             <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="project name" />
-            <input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="git repo url" />
+            <input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="git repo url (used for clone rooms)" />
+            <input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="local repo path (optional main room)" />
             <input value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} placeholder="default branch" />
-            <button disabled={busy || !projectName.trim() || !repoUrl.trim()} onClick={createProject}>save project</button>
+            <button disabled={busy || !projectName.trim() || (!repoUrl.trim() && !projectPath.trim())} onClick={createProject}>save project</button>
           </div>
         </section>
         <section>
           <div className="section-head"><h2>rooms</h2><span>{projectRooms.length}</span></div>
           {projectRooms.map((room) => {
             const label = processCountLabel(processCounts[room.id]);
-            return <button className={selectedRoom?.id === room.id ? 'nav active' : 'nav'} key={room.id} onClick={() => setSelectedRoomId(room.id)}><strong>{room.name}</strong><span className="nav-meta"><span className={`pill ${room.status}`}>{room.status}</span>{label && <span className="process-badge">{label}</span>}</span></button>;
+            return <button className={selectedRoom?.id === room.id ? 'nav active' : 'nav'} key={room.id} onClick={() => setSelectedRoomId(room.id)}><strong>{room.name}</strong><span className="nav-meta"><span className={`pill ${room.kind ?? 'clone'}`}>{room.kind === 'main' ? 'main repo' : 'clone'}</span><span className={`pill ${room.status}`}>{room.status}</span>{label && <span className="process-badge">{label}</span>}</span></button>;
           })}
           <div className="form-card">
             <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
@@ -409,7 +423,7 @@ function App() {
           </nav>
         </header>
         {error && <div className="error">{error}</div>}
-        {!selectedRoom && <div className="empty splash"><strong>No room selected.</strong><span>Create a project, then clone a room. Each room is a full repository clone.</span></div>}
+        {!selectedRoom && <div className="empty splash"><strong>No room selected.</strong><span>Create a project from a local repo path for a main room, or clone a separate room.</span></div>}
         {selectedRoom && selectedRoom.status !== 'idle' && (
           <div className={`empty splash room-state ${selectedRoom.status}`}>
             <strong>{selectedRoom.status === 'creating' ? 'Cloning room…' : 'Room clone failed'}</strong>

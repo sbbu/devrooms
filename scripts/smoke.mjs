@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -78,7 +78,7 @@ async function websocketProbe(url, onOpen, expected) {
 async function roomWebsocketProbe(port, roomId, expected) {
   await websocketProbe(
     `ws://127.0.0.1:${port}/ws/rooms/${roomId}/terminal`,
-    (ws) => setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: 'printf "%s\\n" "$PWD"\n' })), 200),
+    (ws) => setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: 'printf "%s|%s|%s\\n" "$PWD" "$TERMINAL_CWD" "$DEVROOMS_ROOM_PATH"\n' })), 200),
     expected,
   );
 }
@@ -93,6 +93,7 @@ const remote = path.join(root, 'remote.git');
 const home = path.join(root, 'home');
 const roomsRoot = path.join(root, 'rooms');
 mkdirSync(src, { recursive: true });
+const srcRoot = realpathSync(src);
 run('git', ['init', '-b', 'main'], src);
 run('git', ['config', 'user.name', 'Smoke'], src);
 run('git', ['config', 'user.email', 'smoke@example.invalid'], src);
@@ -108,10 +109,10 @@ const base = `http://127.0.0.1:${port}`;
 let logs = '';
 let server;
 
-function startServer() {
+function startServer(extraEnv = {}) {
   const child = spawn('node', ['dist/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot },
+    env: { ...process.env, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', (chunk) => { logs += chunk.toString(); });
@@ -138,6 +139,17 @@ try {
   if (meta.name !== 'devrooms' || meta.projectCount !== 0 || meta.roomCount !== 0) throw new Error(`bad meta payload: ${JSON.stringify(meta)}`);
   const presets = await request(base, '/api/presets');
   if (!Array.isArray(presets.presets) || !presets.presets.some((preset) => preset.id === 'hermes-tui')) throw new Error('missing hermes preset');
+
+  await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Local Sample', rootPath: src }) });
+  const localRooms = await request(base, '/api/projects/local-sample/rooms');
+  const mainRoom = localRooms.rooms.find((item) => item.id === 'local-sample-main');
+  if (!mainRoom || mainRoom.kind !== 'main' || mainRoom.status !== 'idle' || mainRoom.path !== srcRoot) throw new Error(`missing local main room: ${JSON.stringify(localRooms)}`);
+  const mainProc = await request(base, `/api/rooms/${mainRoom.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'main env', command: 'printf "%s|%s|%s|%s\n" "$PWD" "$TERMINAL_CWD" "$DEVROOMS_ROOM_KIND" "$DEVROOMS_ROOM_PATH"' }) });
+  await delay(1000);
+  const mainProcesses = await request(base, `/api/rooms/${mainRoom.id}/processes`);
+  const mainDone = mainProcesses.processes.find((item) => item.id === mainProc.process.id);
+  if (!mainDone || mainDone.exitCode !== 0 || !mainDone.logTail.includes(`${srcRoot}|${srcRoot}|main|${srcRoot}`)) throw new Error('main room process env smoke failed');
+  await request(base, `/api/rooms/${mainRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: false }) });
 
   await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Sample', repoUrl: remote }) });
   const created = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'alpha' }) });
@@ -179,11 +191,11 @@ try {
   await request(base, `/api/rooms/${room.id}/git/pull`, { method: 'POST' });
   if (!readFileSync(path.join(roomsRoot, 'sample', 'alpha', 'REMOTE.md'), 'utf8').includes('from remote')) throw new Error('pull did not bring down remote update');
 
-  const started = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'smoke', command: 'pwd && git status --short' }) });
+  const started = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'smoke', command: 'printf "%s|%s|%s|%s\n" "$PWD" "$TERMINAL_CWD" "$DEVROOMS_ROOM_PATH" "$DEVROOMS_ROOM_ID" && git status --short' }) });
   await delay(1000);
   let processes = await request(base, `/api/rooms/${room.id}/processes`);
   let proc = processes.processes.find((item) => item.id === started.process.id);
-  if (!proc || proc.exitCode !== 0 || !proc.logTail.includes(room.path)) throw new Error('process log/status smoke failed');
+  if (!proc || proc.exitCode !== 0 || !proc.logTail.includes(`${room.path}|${room.path}|${room.path}|${room.id}`)) throw new Error('process cwd/env smoke failed');
 
   const longRunning = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'long smoke', command: 'printf live-start && sleep 30' }) });
   processes = await request(base, `/api/rooms/${room.id}/processes`);
@@ -202,7 +214,7 @@ try {
   await processWebsocketProbe(port, longRunning.process.id, 'process lost');
   await request(base, `/api/processes/${longRunning.process.id}`, { method: 'DELETE' });
 
-  await roomWebsocketProbe(port, room.id, room.path);
+  await roomWebsocketProbe(port, room.id, `${room.path}|${room.path}|${room.path}`);
   await request(base, `/api/rooms/${room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
 
   let rejectedBadProject = false;
@@ -225,6 +237,15 @@ try {
   const failedRoom = await waitForRoomStatus(base, 'sample', failedCreate.room.id, 'error');
   if (!failedRoom.error) throw new Error('failed clone did not record an error');
   await request(base, `/api/rooms/${failedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
+
+  await stopServer('SIGTERM');
+  server = startServer({ DEVROOMS_PROJECT_PATH: src, DEVROOMS_PROJECT_NAME: 'Local Sample' });
+  await waitForHealth(base);
+  const launchedRooms = await request(base, '/api/projects/local-sample/rooms');
+  const launchedMain = launchedRooms.rooms.find((item) => item.id === 'local-sample-main');
+  if (!launchedMain || launchedMain.kind !== 'main' || launchedMain.path !== srcRoot) throw new Error(`launch default main room missing: ${JSON.stringify(launchedRooms)}`);
+  await request(base, `/api/rooms/${launchedMain.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: false }) });
+
   console.log('devrooms smoke ok');
 } catch (error) {
   console.error(logs);

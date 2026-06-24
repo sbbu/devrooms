@@ -7,8 +7,9 @@
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "concurrently -n daemon,ui -c blue,magenta \"pnpm dev:daemon\" \"pnpm dev:ui\"",
-    "dev:daemon": "tsx watch src/server.ts",
+    "dev:daemon": "node scripts/dev-daemon.mjs",
     "dev:ui": "vite --host 127.0.0.1",
+    "dev:desktop": "node scripts/dev-desktop.mjs",
     "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.electron.json && vite build",
     "desktop": "pnpm build && electron dist/electron/main.js",
     "install:mac": "bash scripts/install-mac.sh",

@@ -23,16 +23,20 @@ type Project = {
   id: string;
   name: string;
   repoUrl: string;
+  rootPath?: string;
   defaultBranch: string;
   createdAt: string;
   updatedAt: string;
 };
+
+type RoomKind = 'clone' | 'main';
 
 type Room = {
   id: string;
   projectId: string;
   name: string;
   path: string;
+  kind?: RoomKind;
   branch?: string;
   status: 'creating' | 'idle' | 'error';
   error?: string;
@@ -192,14 +196,15 @@ async function recoverLostProcesses(state: State) {
 async function ensureState(): Promise<State> {
   await fs.mkdir(DEVROOMS_HOME, { recursive: true });
   await fs.mkdir(ROOMS_ROOT, { recursive: true });
+  let state: State;
   try {
     const raw = await fs.readFile(STATE_PATH, 'utf8');
-    return recoverLostProcesses(normalizeState(JSON.parse(raw)));
+    state = await recoverLostProcesses(normalizeState(JSON.parse(raw)));
   } catch {
-    const state = emptyState();
+    state = emptyState();
     await saveState(state);
-    return state;
   }
+  return ensureLaunchProject(state);
 }
 
 async function saveState(state: State) {
@@ -268,6 +273,114 @@ function run(command: string, args: string[], cwd: string, opts: { onChild?: (ch
   });
 }
 
+function expandUserPath(value: string) {
+  if (value === '~') return os.homedir();
+  if (value.startsWith(`~${path.sep}`)) return path.join(os.homedir(), value.slice(2));
+  return value;
+}
+
+function resolveLocalPath(value: string) {
+  return path.resolve(expandUserPath(value));
+}
+
+async function pathExists(value: string) {
+  try {
+    await fs.access(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function gitRootFor(value: string) {
+  const result = await run('git', ['rev-parse', '--show-toplevel'], value, { timeoutMs: 10_000 }).catch(() => undefined);
+  if (result?.exitCode !== 0) return undefined;
+  const root = result?.stdout.trim();
+  return root ? path.resolve(root) : undefined;
+}
+
+async function branchForPath(cwd: string) {
+  const result = await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], cwd, { timeoutMs: 10_000 }).catch(() => undefined);
+  const branch = result?.stdout.trim();
+  return result?.exitCode === 0 && branch && branch !== 'HEAD' ? branch : undefined;
+}
+
+async function resolveProjectRoot(input: unknown) {
+  if (typeof input !== 'string' || !input.trim()) return undefined;
+  const requested = resolveLocalPath(input.trim());
+  const exists = await pathExists(requested);
+  if (!exists) throw new HttpError(400, `project path does not exist: ${requested}`);
+  const root = await gitRootFor(requested);
+  if (!root) throw new HttpError(400, `project path is not inside a git repository: ${requested}`);
+  return root;
+}
+
+function mainRoomId(projectId: string) {
+  return `${projectId}-main`;
+}
+
+function upsertMainRoom(state: State, project: Project, rootPath: string, branch: string) {
+  const id = mainRoomId(project.id);
+  const existing = state.rooms[id];
+  if (
+    existing?.projectId === project.id &&
+    existing.name === 'main' &&
+    existing.path === rootPath &&
+    existing.kind === 'main' &&
+    existing.branch === branch &&
+    existing.status === 'idle'
+  ) {
+    return false;
+  }
+  const stamp = now();
+  state.rooms[id] = {
+    id,
+    projectId: project.id,
+    name: 'main',
+    path: rootPath,
+    kind: 'main',
+    branch,
+    status: 'idle',
+    createdAt: existing?.createdAt ?? stamp,
+    updatedAt: stamp,
+  };
+  return true;
+}
+
+async function defaultLaunchProject() {
+  const configuredPath = process.env.DEVROOMS_PROJECT_PATH?.trim();
+  if (!configuredPath) return undefined;
+  const rootPath = await resolveProjectRoot(configuredPath);
+  if (!rootPath) return undefined;
+  const name = process.env.DEVROOMS_PROJECT_NAME?.trim() || path.basename(rootPath);
+  const id = slugify(process.env.DEVROOMS_PROJECT_ID?.trim() || name);
+  if (!id) return undefined;
+  const repoUrl = process.env.DEVROOMS_PROJECT_REPO_URL?.trim() || rootPath;
+  const defaultBranch = process.env.DEVROOMS_PROJECT_BRANCH?.trim() || await branchForPath(rootPath) || await detectDefaultBranch(repoUrl) || 'main';
+  return { defaultBranch, id, name, repoUrl, rootPath };
+}
+
+async function ensureLaunchProject(state: State) {
+  const launch = await defaultLaunchProject();
+  if (!launch) return state;
+  const stamp = now();
+  const existing = state.projects[launch.id];
+  const project: Project = {
+    id: launch.id,
+    name: launch.name,
+    repoUrl: launch.repoUrl,
+    rootPath: launch.rootPath,
+    defaultBranch: launch.defaultBranch,
+    createdAt: existing?.createdAt ?? stamp,
+    updatedAt: existing?.updatedAt ?? stamp,
+  };
+  const changedProject = !existing || existing.name !== project.name || existing.repoUrl !== project.repoUrl || existing.rootPath !== project.rootPath || existing.defaultBranch !== project.defaultBranch;
+  if (changedProject) state.projects[project.id] = project;
+  const changedRoom = upsertMainRoom(state, project, launch.rootPath, launch.defaultBranch);
+  if (changedProject || changedRoom) await saveState(state);
+  return state;
+}
+
 async function runGit(room: Room, args: string[], opts: { timeoutMs?: number } = {}) {
   const result = await run('git', args, room.path, opts);
   if (result.exitCode !== 0) {
@@ -333,7 +446,7 @@ function agentPresets(): AgentPreset[] {
       id: 'hermes-tui',
       label: 'Hermes TUI',
       description: 'Open a Hermes chat session inside this room.',
-      command: 'hermes chat --tui --accept-hooks --pass-session-id',
+      command: 'hermes chat --tui --source devrooms --accept-hooks --pass-session-id',
       available: hasHermes,
     },
     {
@@ -392,10 +505,13 @@ async function assertRepoReachable(repoUrl: string, defaultBranch: string) {
 
 async function createProject(body: unknown) {
   const input = body as Record<string, unknown>;
+  const rootPath = await resolveProjectRoot(input.rootPath);
   const name = requireString(input.name, 'name');
-  const repoUrl = requireString(input.repoUrl, 'repoUrl');
+  const suppliedRepoUrl = typeof input.repoUrl === 'string' && input.repoUrl.trim() ? input.repoUrl.trim() : undefined;
+  const repoUrl = suppliedRepoUrl ?? rootPath;
+  if (!repoUrl) throw new HttpError(400, 'repoUrl is required unless rootPath is set');
   const suppliedBranch = typeof input.defaultBranch === 'string' && input.defaultBranch.trim() ? input.defaultBranch.trim() : undefined;
-  const defaultBranch = suppliedBranch ?? (await detectDefaultBranch(repoUrl)) ?? 'main';
+  const defaultBranch = suppliedBranch ?? (await detectDefaultBranch(repoUrl)) ?? (rootPath ? await branchForPath(rootPath) : undefined) ?? 'main';
   await assertRepoReachable(repoUrl, defaultBranch);
   const id = slugify(typeof input.id === 'string' && input.id.trim() ? input.id : name);
   if (!id) throw new HttpError(400, 'project id is empty after slugification');
@@ -407,11 +523,13 @@ async function createProject(body: unknown) {
     id,
     name,
     repoUrl,
+    rootPath,
     defaultBranch,
     createdAt: existing?.createdAt ?? stamp,
     updatedAt: stamp,
   };
   state.projects[id] = project;
+  if (rootPath) upsertMainRoom(state, project, rootPath, defaultBranch);
   await saveState(state);
   return project;
 }
@@ -441,6 +559,7 @@ async function createRoom(projectId: string, body: unknown) {
     projectId: project.id,
     name,
     path: roomPath,
+    kind: 'clone',
     branch: branch ?? project.defaultBranch,
     status: 'creating',
     createdAt: stamp,
@@ -484,6 +603,9 @@ async function deleteRoom(roomId: string, body: unknown) {
   const force = input.force === true;
   const state = await getState();
   const room = getRoom(state, roomId);
+  if (deleteFiles && room.kind === 'main') {
+    throw new HttpError(400, 'main repo room files are never deleted by Devrooms');
+  }
   deletedRoomTokens.add(roomToken(room));
   const cloneJob = cloneJobs.get(roomId);
   if (cloneJob && !cloneJob.killed) cloneJob.kill('SIGTERM');
@@ -545,6 +667,18 @@ async function removeProcessRecord(processId: string) {
   return true;
 }
 
+function devroomEnv(room: Room) {
+  return {
+    ...process.env,
+    DEVROOMS_ROOM_ID: room.id,
+    DEVROOMS_ROOM_NAME: room.name,
+    DEVROOMS_ROOM_PATH: room.path,
+    DEVROOMS_ROOM_KIND: room.kind ?? 'clone',
+    DEVROOMS_PROJECT_ID: room.projectId,
+    TERMINAL_CWD: room.path,
+  };
+}
+
 async function spawnProcess(room: Room, command: string, name?: string) {
   const id = `proc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const shell = process.env.SHELL ?? '/bin/zsh';
@@ -553,7 +687,7 @@ async function spawnProcess(room: Room, command: string, name?: string) {
     cols: 120,
     rows: 36,
     cwd: room.path,
-    env: { ...process.env, DEVROOMS_ROOM_ID: room.id, DEVROOMS_ROOM_PATH: room.path },
+    env: devroomEnv(room),
   });
   const managed: ManagedProcess = {
     id,
@@ -847,7 +981,7 @@ async function main() {
             cols: 120,
             rows: 36,
             cwd: room.path,
-            env: { ...process.env, DEVROOMS_ROOM_ID: room.id, DEVROOMS_ROOM_PATH: room.path },
+            env: devroomEnv(room),
           });
           child.write(`printf '\\033]0;devrooms: ${room.name.replace(/'/g, '')}\\007'\r`);
           wirePtySocket(ws, child);

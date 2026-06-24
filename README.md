@@ -9,13 +9,14 @@ It gives each project durable room-style workspaces: full repo clones with a ter
 Devrooms currently ships as a daemon + web UI, plus an Electron shell:
 
 - project registry
-- room registry
+- room registry with a direct `main` room for a local repo and clone rooms for parallel work
 - room creation via async full `git clone`
 - remote PTY terminal streamed into the browser with xterm.js
 - git branch/status/diff/stage/unstage/commit/fetch/pull/push controls
 - subagent/process launcher with presets for Hermes, Codex, Claude Code, and OpenCode
 - Electron desktop entrypoint that starts/attaches to the local daemon
-- smoke coverage for project creation, room cloning, git operations, process launch, and websocket terminal attachment
+- live development scripts for coding Devrooms inside Devrooms itself
+- smoke coverage for local main rooms, project creation, room cloning, git operations, process launch, and websocket terminal attachment
 
 See:
 
@@ -48,6 +49,16 @@ Dev mode:
 pnpm dev
 ```
 
+In dev mode the daemon gets `DEVROOMS_PROJECT_PATH=$PWD`, so Devrooms auto-registers the current git checkout as the default project and creates a `main` room that points directly at the repo instead of cloning it.
+
+Live desktop dev mode, with Vite HMR for the UI and `tsx watch` for the daemon:
+
+```bash
+pnpm run dev:desktop
+```
+
+This opens Electron against the Vite dev server so you can use Devrooms to work on Devrooms itself.
+
 Desktop shell:
 
 ```bash
@@ -79,10 +90,12 @@ The packaged app starts its own local daemon on `127.0.0.1:4317` unless `DEVROOM
 Use:
 
 1. Open `Devrooms.app`.
-2. Create a project with a git repo URL/path.
-3. Clone a room. Room creation is async; the room shows `creating`, then `idle` or `error`.
+2. Create a project with either:
+   - a local repo path, which creates a direct `main` room; or
+   - a git repo URL/path, which can be cloned into separate rooms.
+3. Use the default `main` room for direct work on the source checkout, or clone extra rooms for isolated branches. Room creation is async; clone rooms show `creating`, then `idle` or `error`.
 4. Use the tabs:
-   - `terminal` for an interactive shell in the room clone.
+   - `terminal` for an interactive shell in the selected room.
    - `git` for status, diffs, stage/unstage, commit, branch, fetch/pull/push.
    - `subagents` to launch and attach agent/process PTYs.
 
