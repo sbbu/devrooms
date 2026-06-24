@@ -56,12 +56,12 @@ async function waitForRoomStatus(base, projectId, roomId, wantedStatus) {
   throw new Error(`room did not become ${wantedStatus}: ${roomId}`);
 }
 
-async function websocketProbe(port, roomId, expected) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/rooms/${roomId}/terminal`);
+async function websocketProbe(url, onOpen, expected) {
+  const ws = new WebSocket(url);
   let out = '';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`websocket timed out; output=${out}`)), 6000);
-    ws.on('open', () => ws.send(JSON.stringify({ type: 'input', data: 'pwd\n' })));
+    ws.on('open', () => onOpen?.(ws));
     ws.on('message', (raw) => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === 'output') out += msg.data;
@@ -73,6 +73,18 @@ async function websocketProbe(port, roomId, expected) {
     ws.on('error', reject);
   });
   ws.close();
+}
+
+async function roomWebsocketProbe(port, roomId, expected) {
+  await websocketProbe(
+    `ws://127.0.0.1:${port}/ws/rooms/${roomId}/terminal`,
+    (ws) => setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: 'printf "%s\\n" "$PWD"\n' })), 200),
+    expected,
+  );
+}
+
+async function processWebsocketProbe(port, processId, expected) {
+  await websocketProbe(`ws://127.0.0.1:${port}/ws/processes/${processId}`, null, expected);
 }
 
 const root = mkdtempSync(path.join(tmpdir(), 'devrooms-smoke-'));
@@ -88,17 +100,30 @@ run('git', ['add', 'README.md'], src);
 run('git', ['commit', '-m', 'initial sample'], src);
 
 const port = await freePort();
-const server = spawn('node', ['dist/server.js'], {
-  cwd: process.cwd(),
-  env: { ...process.env, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
+const base = `http://127.0.0.1:${port}`;
 let logs = '';
-server.stdout.on('data', (chunk) => { logs += chunk.toString(); });
-server.stderr.on('data', (chunk) => { logs += chunk.toString(); });
+let server;
+
+function startServer() {
+  const child = spawn('node', ['dist/server.js'], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => { logs += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { logs += chunk.toString(); });
+  return child;
+}
+
+async function stopServer(signal = 'SIGTERM') {
+  if (!server || server.killed) return;
+  server.kill(signal);
+  await delay(500);
+}
+
+server = startServer();
 
 try {
-  const base = `http://127.0.0.1:${port}`;
   const health = await waitForHealth(base);
   if (health.name !== 'devrooms' || health.port !== port || health.bindHost !== '127.0.0.1') throw new Error(`bad health metadata: ${JSON.stringify(health)}`);
   const indexHtml = await text(base, '/');
@@ -133,11 +158,24 @@ try {
 
   const started = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'smoke', command: 'pwd && git status --short' }) });
   await delay(1000);
-  const processes = await request(base, `/api/rooms/${room.id}/processes`);
-  const proc = processes.processes.find((item) => item.id === started.process.id);
+  let processes = await request(base, `/api/rooms/${room.id}/processes`);
+  let proc = processes.processes.find((item) => item.id === started.process.id);
   if (!proc || proc.exitCode !== 0 || !proc.logTail.includes(room.path)) throw new Error('process log/status smoke failed');
 
-  await websocketProbe(port, room.id, room.path);
+  const longRunning = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'long smoke', command: 'printf live-start && sleep 30' }) });
+  processes = await request(base, `/api/rooms/${room.id}/processes`);
+  proc = processes.processes.find((item) => item.id === longRunning.process.id);
+  if (!proc || proc.status !== 'running') throw new Error(`long-running process was not persisted as running: ${JSON.stringify(proc)}`);
+  await stopServer('SIGKILL');
+  server = startServer();
+  await waitForHealth(base);
+  processes = await request(base, `/api/rooms/${room.id}/processes`);
+  proc = processes.processes.find((item) => item.id === longRunning.process.id);
+  if (!proc || proc.status !== 'lost' || !proc.logTail.includes('PTY is no longer attached')) throw new Error(`expected lost persisted process after restart: ${JSON.stringify(proc)}`);
+  await processWebsocketProbe(port, longRunning.process.id, 'process lost');
+  await request(base, `/api/processes/${longRunning.process.id}`, { method: 'DELETE' });
+
+  await roomWebsocketProbe(port, room.id, room.path);
   await request(base, `/api/rooms/${room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
 
   await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Broken', repoUrl: path.join(root, 'missing-repo') }) });
@@ -151,6 +189,6 @@ try {
   console.error(logs);
   throw error;
 } finally {
-  server.kill('SIGTERM');
+  await stopServer('SIGTERM');
   rmSync(root, { recursive: true, force: true });
 }

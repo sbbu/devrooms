@@ -134,6 +134,7 @@ header nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end
 .status { border-radius: 999px; font-size: 12px; padding: 4px 8px; }
 .status.running { background: #173323; color: #a4f3c2; }
 .status.exited { background: #242b37; color: #aeb8cc; }
+.status.lost { background: #4a3414; color: #ffd28a; }
 .attached-terminal { border: 1px solid var(--line); border-radius: 14px; display: flex; min-height: 0; overflow: hidden; }
 .attached-terminal .terminal { padding: 0; }
 .attached-terminal .terminal .xterm { border: 0; border-radius: 0; }

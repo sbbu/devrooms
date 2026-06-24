@@ -44,7 +44,7 @@ Room creation is asynchronous: `POST /api/projects/:projectId/rooms` returns `20
 
 ## Process model
 
-Processes are PTYs spawned inside a room. The daemon keeps in-memory logs and statuses while it is running. Future work should persist process records across daemon restarts, but PTYs themselves cannot be resurrected after daemon death.
+Processes are PTYs spawned inside a room. The daemon persists process records in the state file. Live PTYs cannot be resurrected after daemon death, so any record that was `running` on startup is downgraded to `lost` with a clear log marker. Graceful shutdown marks live processes `exited`.
 
 ## Git model
 

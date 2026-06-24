@@ -40,10 +40,25 @@ type Room = {
   updatedAt: string;
 };
 
+type ProcessStatus = 'running' | 'exited' | 'lost';
+
+type ProcessRecord = {
+  id: string;
+  roomId: string;
+  name: string;
+  command: string;
+  status: ProcessStatus;
+  startedAt: string;
+  exitedAt?: string;
+  exitCode?: number;
+  logTail?: string;
+};
+
 type State = {
   version: 1;
   projects: Record<string, Project>;
   rooms: Record<string, Room>;
+  processes: Record<string, ProcessRecord>;
 };
 
 type ManagedProcess = {
@@ -111,7 +126,37 @@ class HttpError extends Error {
 }
 
 function emptyState(): State {
-  return { version: 1, projects: {}, rooms: {} };
+  return { version: 1, projects: {}, rooms: {}, processes: {} };
+}
+
+function normalizeProcessRecord(value: unknown): ProcessRecord | null {
+  const candidate = value as Partial<ProcessRecord>;
+  if (!candidate || typeof candidate !== 'object') return null;
+  if (typeof candidate.id !== 'string' || typeof candidate.roomId !== 'string') return null;
+  if (typeof candidate.name !== 'string' || typeof candidate.command !== 'string') return null;
+  if (typeof candidate.startedAt !== 'string') return null;
+  const status: ProcessStatus = candidate.status === 'exited' || candidate.status === 'lost' ? candidate.status : 'running';
+  return {
+    id: candidate.id,
+    roomId: candidate.roomId,
+    name: candidate.name,
+    command: candidate.command,
+    status,
+    startedAt: candidate.startedAt,
+    exitedAt: typeof candidate.exitedAt === 'string' ? candidate.exitedAt : undefined,
+    exitCode: typeof candidate.exitCode === 'number' ? candidate.exitCode : undefined,
+    logTail: typeof candidate.logTail === 'string' ? candidate.logTail : undefined,
+  };
+}
+
+function normalizeProcessRecords(raw: unknown): Record<string, ProcessRecord> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, ProcessRecord> = {};
+  for (const value of Object.values(raw as Record<string, unknown>)) {
+    const record = normalizeProcessRecord(value);
+    if (record) out[record.id] = record;
+  }
+  return out;
 }
 
 function normalizeState(raw: unknown): State {
@@ -120,7 +165,22 @@ function normalizeState(raw: unknown): State {
     version: 1,
     projects: candidate.projects ?? {},
     rooms: candidate.rooms ?? {},
+    processes: normalizeProcessRecords(candidate.processes),
   };
+}
+
+async function recoverLostProcesses(state: State) {
+  let changed = false;
+  for (const record of Object.values(state.processes)) {
+    if (record.status === 'running' && !processes.has(record.id)) {
+      record.status = 'lost';
+      record.exitedAt = record.exitedAt ?? STARTED_AT;
+      record.logTail = `${record.logTail ?? ''}\n[devrooms daemon restarted; PTY is no longer attached]\n`.slice(-4000);
+      changed = true;
+    }
+  }
+  if (changed) await saveState(state);
+  return state;
 }
 
 async function ensureState(): Promise<State> {
@@ -128,7 +188,7 @@ async function ensureState(): Promise<State> {
   await fs.mkdir(ROOMS_ROOT, { recursive: true });
   try {
     const raw = await fs.readFile(STATE_PATH, 'utf8');
-    return normalizeState(JSON.parse(raw));
+    return recoverLostProcesses(normalizeState(JSON.parse(raw)));
   } catch {
     const state = emptyState();
     await saveState(state);
@@ -405,6 +465,12 @@ async function deleteRoom(roomId: string, body: unknown) {
     proc.status = 'exited';
     proc.exitedAt = now();
   }
+  for (const proc of [...processes.values()].filter((item) => item.roomId === roomId)) {
+    processes.delete(proc.id);
+  }
+  for (const [id, record] of Object.entries(state.processes)) {
+    if (record.roomId === roomId) delete state.processes[id];
+  }
   delete state.rooms[roomId];
   await saveState(state);
   if (deleteFiles) {
@@ -414,7 +480,40 @@ async function deleteRoom(roomId: string, body: unknown) {
   return { room, deleteFiles, killed: running.length };
 }
 
-function spawnProcess(room: Room, command: string, name?: string) {
+function processLogTail(proc: ManagedProcess) {
+  return proc.log.join('').slice(-4000);
+}
+
+function recordFromProcess(proc: ManagedProcess): ProcessRecord {
+  return {
+    id: proc.id,
+    roomId: proc.roomId,
+    name: proc.name,
+    command: proc.command,
+    status: proc.status,
+    startedAt: proc.startedAt,
+    exitedAt: proc.exitedAt,
+    exitCode: proc.exitCode,
+    logTail: processLogTail(proc),
+  };
+}
+
+async function saveProcessRecord(record: ProcessRecord) {
+  const state = await getState();
+  if (!state.rooms[record.roomId]) return;
+  state.processes[record.id] = record;
+  await saveState(state);
+}
+
+async function removeProcessRecord(processId: string) {
+  const state = await getState();
+  if (!state.processes[processId]) return false;
+  delete state.processes[processId];
+  await saveState(state);
+  return true;
+}
+
+async function spawnProcess(room: Room, command: string, name?: string) {
   const id = `proc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const shell = process.env.SHELL ?? '/bin/zsh';
   const child = pty.spawn(shell, ['-lc', command], {
@@ -442,12 +541,15 @@ function spawnProcess(room: Room, command: string, name?: string) {
     managed.status = 'exited';
     managed.exitCode = exitCode;
     managed.exitedAt = now();
+    void saveProcessRecord(recordFromProcess(managed)).catch((error) => console.error('failed to persist process exit', error));
   });
   processes.set(id, managed);
+  await saveProcessRecord(recordFromProcess(managed));
   return managed;
 }
 
-function processSummary(proc: ManagedProcess) {
+function processSummary(proc: ManagedProcess | ProcessRecord) {
+  const logTail = 'log' in proc ? processLogTail(proc) : proc.logTail ?? '';
   return {
     id: proc.id,
     roomId: proc.roomId,
@@ -457,7 +559,7 @@ function processSummary(proc: ManagedProcess) {
     startedAt: proc.startedAt,
     exitedAt: proc.exitedAt,
     exitCode: proc.exitCode,
-    logTail: proc.log.join('').slice(-4000),
+    logTail,
   };
 }
 
@@ -476,17 +578,18 @@ function metaSummary(state: State) {
     roomsRoot: ROOMS_ROOT,
     projectCount: Object.keys(state.projects).length,
     roomCount: Object.keys(state.rooms).length,
-    processCount: processes.size,
-    runningProcessCount: [...processes.values()].filter((proc) => proc.status === 'running').length,
+    processCount: Object.keys(state.processes).length,
+    runningProcessCount: Object.values(state.processes).filter((proc) => proc.status === 'running').length,
   };
 }
 
-function killAllProcesses() {
+async function killAllProcesses() {
   for (const proc of processes.values()) {
     if (proc.status === 'running') {
       proc.pty.kill();
       proc.status = 'exited';
       proc.exitedAt = now();
+      await saveProcessRecord(recordFromProcess(proc));
     }
   }
 }
@@ -629,8 +732,15 @@ async function main() {
   });
 
   app.get('/api/rooms/:roomId/processes', async (req, res) => {
-    const roomProcesses = [...processes.values()].filter((proc) => proc.roomId === req.params.roomId).map(processSummary);
-    res.json({ processes: roomProcesses });
+    const state = await getState();
+    const byId = new Map<string, ReturnType<typeof processSummary>>();
+    for (const record of Object.values(state.processes).filter((proc) => proc.roomId === req.params.roomId)) {
+      byId.set(record.id, processSummary(processes.get(record.id) ?? record));
+    }
+    for (const proc of [...processes.values()].filter((item) => item.roomId === req.params.roomId)) {
+      byId.set(proc.id, processSummary(proc));
+    }
+    res.json({ processes: [...byId.values()] });
   });
 
   app.post('/api/rooms/:roomId/processes', async (req, res) => {
@@ -639,7 +749,7 @@ async function main() {
       const room = getRoom(state, req.params.roomId);
       const command = requireString(req.body?.command, 'command');
       const name = typeof req.body?.name === 'string' ? req.body.name : undefined;
-      const proc = spawnProcess(room, command, name);
+      const proc = await spawnProcess(room, command, name);
       res.json({ process: processSummary(proc) });
     } catch (error) {
       apiError(error, res);
@@ -648,10 +758,15 @@ async function main() {
 
   app.delete('/api/processes/:processId', async (req, res) => {
     const proc = processes.get(req.params.processId);
-    if (!proc) return res.status(404).json({ error: 'unknown process' });
+    if (!proc) {
+      const removed = await removeProcessRecord(req.params.processId);
+      if (!removed) return res.status(404).json({ error: 'unknown process' });
+      return res.json({ ok: true, removed: true });
+    }
     if (proc.status === 'running') proc.pty.kill();
     proc.status = 'exited';
     proc.exitedAt = now();
+    await saveProcessRecord(recordFromProcess(proc));
     res.json({ ok: true });
   });
 
@@ -699,7 +814,14 @@ async function main() {
         if (processTerminal) {
           const proc = processes.get(processTerminal[1]);
           if (!proc) {
-            ws.send(JSON.stringify({ type: 'output', data: '[unknown process]\r\n' }));
+            const state = await getState();
+            const record = state.processes[processTerminal[1]];
+            if (record) {
+              const replay = record.logTail ? `${record.logTail}\r\n` : '';
+              ws.send(JSON.stringify({ type: 'output', data: `${replay}[process ${record.status}; PTY is not attached]\r\n` }));
+            } else {
+              ws.send(JSON.stringify({ type: 'output', data: '[unknown process]\r\n' }));
+            }
             ws.close();
             return;
           }
@@ -719,9 +841,14 @@ async function main() {
   });
 
   const shutdown = () => {
-    killAllProcesses();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 1000).unref();
+    void (async () => {
+      await killAllProcesses();
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 1000).unref();
+    })().catch((error) => {
+      console.error('failed to persist process shutdown', error);
+      process.exit(1);
+    });
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);

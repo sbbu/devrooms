@@ -9,7 +9,7 @@ type Project = { id: string; name: string; repoUrl: string; defaultBranch: strin
 type Room = { id: string; projectId: string; name: string; path: string; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number }; branches: string[]; head: string };
-type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
+type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited' | 'lost'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
 type AgentPreset = { id: string; label: string; description: string; command: string; available: boolean };
 
 type Tab = 'terminal' | 'git' | 'subagents';
@@ -212,8 +212,8 @@ function SubagentsPanel({ room, presets }: { room: Room; presets: AgentPreset[] 
       <div className="process-list">
         {processes.length ? processes.map((proc) => (
           <div className={attached === proc.id ? 'process selected' : 'process'} key={proc.id}>
-            <button onClick={() => setAttached(proc.id)}>attach</button>
-            <button onClick={() => kill(proc.id)}>kill</button>
+            <button onClick={() => setAttached(proc.id)}>{proc.status === 'running' ? 'attach' : 'log'}</button>
+            <button onClick={() => kill(proc.id)}>{proc.status === 'running' ? 'kill' : 'dismiss'}</button>
             <strong>{proc.name}</strong>
             <code>{proc.command}</code>
             <span className={`status ${proc.status}`}>{proc.status}{proc.exitCode !== undefined ? `:${proc.exitCode}` : ''}</span>
