@@ -78,8 +78,29 @@ async function websocketProbe(url, onOpen, expected) {
 async function roomWebsocketProbe(port, roomId, expected) {
   await websocketProbe(
     `ws://127.0.0.1:${port}/ws/rooms/${roomId}/terminal`,
-    (ws) => setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: 'printf "%s|%s|%s\\n" "$PWD" "$TERMINAL_CWD" "$DEVROOMS_ROOM_PATH"\n' })), 200),
+    (ws) => setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: 'cd "$DEVROOMS_ROOM_PATH"\nprintf "%s|%s|%s\\n" "$PWD" "$TERMINAL_CWD" "$DEVROOMS_ROOM_PATH"\n' })), 200),
     expected,
+  );
+}
+
+async function roomTerminalReconnectProbe(port, roomId) {
+  const url = `ws://127.0.0.1:${port}/ws/rooms/${roomId}/terminal`;
+  const first = new WebSocket(url);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('first room terminal websocket did not open')), 4000);
+    first.on('open', () => {
+      clearTimeout(timer);
+      first.send(JSON.stringify({ type: 'input', data: 'export DEVROOMS_SMOKE_MARKER=alive\ncd /\nprintf "seed:%s|%s\\n" "$DEVROOMS_SMOKE_MARKER" "$PWD"\n' }));
+      setTimeout(resolve, 600);
+    });
+    first.on('error', reject);
+  });
+  first.close();
+  await delay(300);
+  await websocketProbe(
+    url,
+    (ws) => setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: 'printf "resume:%s|%s\\n" "$DEVROOMS_SMOKE_MARKER" "$PWD"\n' })), 200),
+    'resume:alive|/',
   );
 }
 
@@ -214,6 +235,7 @@ try {
   await processWebsocketProbe(port, longRunning.process.id, 'process lost');
   await request(base, `/api/processes/${longRunning.process.id}`, { method: 'DELETE' });
 
+  await roomTerminalReconnectProbe(port, room.id);
   await roomWebsocketProbe(port, room.id, `${room.path}|${room.path}|${room.path}`);
   await request(base, `/api/rooms/${room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
 

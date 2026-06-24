@@ -78,6 +78,13 @@ type ManagedProcess = {
   log: string[];
 };
 
+type RoomTerminalSession = {
+  roomId: string;
+  status: 'running' | 'exited';
+  pty: pty.IPty;
+  log: string[];
+};
+
 type RunResult = {
   exitCode: number;
   stdout: string;
@@ -93,6 +100,7 @@ type AgentPreset = {
 };
 
 const processes = new Map<string, ManagedProcess>();
+const roomTerminals = new Map<string, RoomTerminalSession>();
 const cloneJobs = new Map<string, ChildProcess>();
 const deletedRoomTokens = new Set<string>();
 
@@ -614,6 +622,7 @@ async function deleteRoom(roomId: string, body: unknown) {
   if (running.length && !force) {
     throw new HttpError(409, `room has ${running.length} running process(es); kill them or pass force=true`);
   }
+  killRoomTerminal(roomId);
   for (const proc of running) {
     proc.pty.kill();
     proc.status = 'exited';
@@ -634,8 +643,47 @@ async function deleteRoom(roomId: string, body: unknown) {
   return { room, deleteFiles, killed: running.length };
 }
 
+function appendPtyLog(log: string[], data: string) {
+  log.push(data);
+  if (log.length > 5000) log.splice(0, log.length - 5000);
+}
+
+function ptyLogTail(log: string[], maxChars = 4000) {
+  return log.join('').slice(-maxChars);
+}
+
 function processLogTail(proc: ManagedProcess) {
-  return proc.log.join('').slice(-4000);
+  return ptyLogTail(proc.log);
+}
+
+function getRoomTerminal(room: Room) {
+  const existing = roomTerminals.get(room.id);
+  if (existing?.status === 'running') return existing;
+  if (existing) roomTerminals.delete(room.id);
+
+  const shell = process.env.SHELL ?? '/bin/zsh';
+  const child = pty.spawn(shell, [], {
+    name: 'xterm-256color',
+    cols: 120,
+    rows: 36,
+    cwd: room.path,
+    env: devroomEnv(room),
+  });
+  const session: RoomTerminalSession = { roomId: room.id, status: 'running', pty: child, log: [] };
+  child.onData((data) => appendPtyLog(session.log, data));
+  child.onExit(({ exitCode }) => {
+    session.status = 'exited';
+    appendPtyLog(session.log, `\r\n[devrooms terminal exited: ${exitCode}]\r\n`);
+  });
+  roomTerminals.set(room.id, session);
+  return session;
+}
+
+function killRoomTerminal(roomId: string) {
+  const session = roomTerminals.get(roomId);
+  if (!session) return;
+  if (session.status === 'running') session.pty.kill();
+  roomTerminals.delete(roomId);
 }
 
 function recordFromProcess(proc: ManagedProcess): ProcessRecord {
@@ -670,6 +718,9 @@ async function removeProcessRecord(processId: string) {
 function devroomEnv(room: Room) {
   return {
     ...process.env,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    TERM_PROGRAM: 'devrooms',
     DEVROOMS_ROOM_ID: room.id,
     DEVROOMS_ROOM_NAME: room.name,
     DEVROOMS_ROOM_PATH: room.path,
@@ -699,10 +750,7 @@ async function spawnProcess(room: Room, command: string, name?: string) {
     pty: child,
     log: [],
   };
-  child.onData((data) => {
-    managed.log.push(data);
-    if (managed.log.length > 2000) managed.log.splice(0, managed.log.length - 2000);
-  });
+  child.onData((data) => appendPtyLog(managed.log, data));
   child.onExit(({ exitCode }) => {
     managed.status = 'exited';
     managed.exitCode = exitCode;
@@ -762,6 +810,10 @@ function metaSummary(state: State) {
 }
 
 async function killAllProcesses() {
+  for (const session of roomTerminals.values()) {
+    if (session.status === 'running') session.pty.kill();
+  }
+  roomTerminals.clear();
   for (const proc of processes.values()) {
     if (proc.status === 'running') {
       proc.pty.kill();
@@ -975,27 +1027,20 @@ async function main() {
         if (roomTerminal) {
           const state = await getState();
           const room = getRoom(state, roomTerminal[1]);
-          const shell = process.env.SHELL ?? '/bin/zsh';
-          const child = pty.spawn(shell, [], {
-            name: 'xterm-256color',
-            cols: 120,
-            rows: 36,
-            cwd: room.path,
-            env: devroomEnv(room),
-          });
-          child.write(`printf '\\033]0;devrooms: ${room.name.replace(/'/g, '')}\\007'\r`);
-          wirePtySocket(ws, child);
-          ws.on('close', () => child.kill());
+          const session = getRoomTerminal(room);
+          const replay = url.searchParams.get('replay') === '0' ? '' : ptyLogTail(session.log, 200_000);
+          wirePtySocket(ws, session.pty, replay);
           return;
         }
 
         if (processTerminal) {
           const proc = processes.get(processTerminal[1]);
+          const wantsReplay = url.searchParams.get('replay') !== '0';
           if (!proc) {
             const state = await getState();
             const record = state.processes[processTerminal[1]];
             if (record) {
-              const replay = record.logTail ? `${record.logTail}\r\n` : '';
+              const replay = wantsReplay && record.logTail ? `${record.logTail}\r\n` : '';
               ws.send(JSON.stringify({ type: 'output', data: `${replay}[process ${record.status}; PTY is not attached]\r\n` }));
             } else {
               ws.send(JSON.stringify({ type: 'output', data: '[unknown process]\r\n' }));
@@ -1003,7 +1048,7 @@ async function main() {
             ws.close();
             return;
           }
-          wirePtySocket(ws, proc.pty, proc.log.join(''));
+          wirePtySocket(ws, proc.pty, wantsReplay ? ptyLogTail(proc.log, 200_000) : '');
         }
       });
     } catch (error) {

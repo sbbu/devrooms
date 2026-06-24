@@ -56,49 +56,136 @@ function fileStatusLabel(file: GitFile) {
   return 'changed';
 }
 
+type TerminalResource = {
+  key: string;
+  container: HTMLDivElement;
+  term: Terminal;
+  fit: FitAddon;
+  opened: boolean;
+  hasOutput: boolean;
+  endpoint?: string;
+  socket?: WebSocket;
+  input?: { dispose(): void };
+};
+
+declare global {
+  interface Window {
+    __DEVROOMS_TERMINALS__?: Map<string, TerminalResource>;
+    __DEVROOMS_TERMINAL_UNLOAD_BOUND__?: boolean;
+  }
+}
+
+function terminalCache() {
+  window.__DEVROOMS_TERMINALS__ ??= new Map<string, TerminalResource>();
+  if (!window.__DEVROOMS_TERMINAL_UNLOAD_BOUND__) {
+    window.addEventListener('beforeunload', () => {
+      for (const resource of window.__DEVROOMS_TERMINALS__?.values() ?? []) resource.socket?.close();
+    });
+    window.__DEVROOMS_TERMINAL_UNLOAD_BOUND__ = true;
+  }
+  return window.__DEVROOMS_TERMINALS__;
+}
+
+function terminalTarget(roomId?: string, processId?: string) {
+  if (processId) return { key: `process:${processId}`, endpoint: `/ws/processes/${processId}` };
+  if (roomId) return { key: `room:${roomId}`, endpoint: `/ws/rooms/${roomId}/terminal` };
+  return null;
+}
+
+function getTerminalResource(key: string) {
+  const cache = terminalCache();
+  const existing = cache.get(key);
+  if (existing) return existing;
+
+  const term = new Terminal({
+    cursorBlink: true,
+    convertEol: false,
+    fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, ui-monospace, monospace',
+    fontSize: 13,
+    lineHeight: 1.18,
+    macOptionIsMeta: true,
+    scrollback: 10000,
+    theme: { background: '#090b10', foreground: '#d6deff', cursor: '#f4f7ff', selectionBackground: '#34415e' },
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  const container = document.createElement('div');
+  container.className = 'terminal-surface';
+  const resource: TerminalResource = { key, container, term, fit, opened: false, hasOutput: false };
+  resource.input = term.onData((data) => {
+    const socket = resource.socket;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data }));
+  });
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey) {
+      const socket = resource.socket;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: '\n' }));
+      event.preventDefault();
+      return false;
+    }
+    return true;
+  });
+  cache.set(key, resource);
+  return resource;
+}
+
+function connectTerminal(resource: TerminalResource, endpoint: string, fitAndResize: () => void) {
+  const ready = resource.socket?.readyState;
+  if (resource.endpoint === endpoint && (ready === WebSocket.OPEN || ready === WebSocket.CONNECTING)) {
+    requestAnimationFrame(fitAndResize);
+    return;
+  }
+  if (resource.socket && resource.socket.readyState !== WebSocket.CLOSED) {
+    const stale = resource.socket;
+    resource.socket = undefined;
+    stale.close();
+  }
+
+  const replay = resource.hasOutput ? '0' : '1';
+  const socket = new WebSocket(wsUrl(`${endpoint}?replay=${replay}`));
+  resource.endpoint = endpoint;
+  resource.socket = socket;
+  socket.addEventListener('open', () => {
+    fitAndResize();
+    requestAnimationFrame(() => requestAnimationFrame(fitAndResize));
+  });
+  socket.addEventListener('message', (event) => {
+    const msg = JSON.parse(event.data as string) as { type?: string; data?: string };
+    if (msg.type === 'output' && typeof msg.data === 'string') {
+      resource.hasOutput = true;
+      resource.term.write(msg.data);
+    }
+  });
+  socket.addEventListener('close', () => {
+    if (resource.socket === socket) {
+      resource.socket = undefined;
+      resource.term.writeln('\r\n[devrooms disconnected]');
+    }
+  });
+}
+
 function TerminalPane({ roomId, processId }: { roomId?: string; processId?: string }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || (!roomId && !processId)) return;
-    const term = new Terminal({
-      cursorBlink: true,
-      convertEol: true,
-      fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, ui-monospace, monospace',
-      fontSize: 13,
-      lineHeight: 1.18,
-      theme: { background: '#090b10', foreground: '#d6deff', cursor: '#f4f7ff', selectionBackground: '#34415e' },
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(host);
-    term.focus();
-    const socket = new WebSocket(wsUrl(processId ? `/ws/processes/${processId}` : `/ws/rooms/${roomId}/terminal`));
-    const sendInput = (data: string) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: 'input', data }));
+    const target = terminalTarget(roomId, processId);
+    if (!host || !target) return;
+    const resource = getTerminalResource(target.key);
+    host.replaceChildren(resource.container);
+    if (!resource.opened) {
+      resource.term.open(resource.container);
+      resource.opened = true;
+    }
+    resource.term.focus();
+
     const fitAndResize = () => {
       if (!host.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0) return;
-      fit.fit();
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      resource.fit.fit();
+      const socket = resource.socket;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: resource.term.cols, rows: resource.term.rows }));
     };
-    term.attachCustomKeyEventHandler((event) => {
-      if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey) {
-        sendInput('\n');
-        event.preventDefault();
-        return false;
-      }
-      return true;
-    });
-    socket.addEventListener('open', () => {
-      fitAndResize();
-      requestAnimationFrame(() => requestAnimationFrame(fitAndResize));
-    });
-    socket.addEventListener('message', (event) => {
-      const msg = JSON.parse(event.data as string) as { type: string; data: string };
-      if (msg.type === 'output') term.write(msg.data);
-    });
-    socket.addEventListener('close', () => term.writeln('\r\n[devrooms disconnected]'));
-    const disposable = term.onData(sendInput);
+    connectTerminal(resource, target.endpoint, fitAndResize);
     const observer = new ResizeObserver(() => requestAnimationFrame(fitAndResize));
     observer.observe(host);
     window.addEventListener('resize', fitAndResize);
@@ -106,9 +193,7 @@ function TerminalPane({ roomId, processId }: { roomId?: string; processId?: stri
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', fitAndResize);
-      disposable.dispose();
-      socket.close();
-      term.dispose();
+      if (host.contains(resource.container)) host.removeChild(resource.container);
     };
   }, [roomId, processId]);
 
