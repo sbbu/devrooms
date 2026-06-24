@@ -129,10 +129,10 @@ function getTerminalResource(key: string) {
   return resource;
 }
 
-function connectTerminal(resource: TerminalResource, endpoint: string, fitAndResize: () => void) {
+function connectTerminal(resource: TerminalResource, endpoint: string, scheduleFit: () => void) {
   const ready = resource.socket?.readyState;
   if (resource.endpoint === endpoint && (ready === WebSocket.OPEN || ready === WebSocket.CONNECTING)) {
-    requestAnimationFrame(fitAndResize);
+    scheduleFit();
     return;
   }
   if (resource.socket && resource.socket.readyState !== WebSocket.CLOSED) {
@@ -145,10 +145,7 @@ function connectTerminal(resource: TerminalResource, endpoint: string, fitAndRes
   const socket = new WebSocket(wsUrl(`${endpoint}?replay=${replay}`));
   resource.endpoint = endpoint;
   resource.socket = socket;
-  socket.addEventListener('open', () => {
-    fitAndResize();
-    requestAnimationFrame(() => requestAnimationFrame(fitAndResize));
-  });
+  socket.addEventListener('open', scheduleFit);
   socket.addEventListener('message', (event) => {
     const msg = JSON.parse(event.data as string) as { type?: string; data?: string };
     if (msg.type === 'output' && typeof msg.data === 'string') {
@@ -172,6 +169,7 @@ function TerminalPane({ roomId, processId }: { roomId?: string; processId?: stri
     const target = terminalTarget(roomId, processId);
     if (!host || !target) return;
     const resource = getTerminalResource(target.key);
+    let disposed = false;
     host.replaceChildren(resource.container);
     if (!resource.opened) {
       resource.term.open(resource.container);
@@ -180,24 +178,39 @@ function TerminalPane({ roomId, processId }: { roomId?: string; processId?: stri
     resource.term.focus();
 
     const fitAndResize = () => {
-      if (!host.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0) return;
-      resource.fit.fit();
+      if (disposed || !host.isConnected || !resource.container.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0) return;
+      const proposed = resource.fit.proposeDimensions();
+      if (!proposed) return;
+      const cols = Math.max(2, proposed.cols - 1);
+      const rows = Math.max(2, proposed.rows);
+      if (resource.term.cols !== cols || resource.term.rows !== rows) resource.term.resize(cols, rows);
       const socket = resource.socket;
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: resource.term.cols, rows: resource.term.rows }));
     };
-    connectTerminal(resource, target.endpoint, fitAndResize);
-    const observer = new ResizeObserver(() => requestAnimationFrame(fitAndResize));
+    const scheduleFit = () => {
+      requestAnimationFrame(() => {
+        fitAndResize();
+        requestAnimationFrame(fitAndResize);
+        window.setTimeout(fitAndResize, 50);
+      });
+    };
+    fitAndResize();
+    connectTerminal(resource, target.endpoint, scheduleFit);
+    const observer = new ResizeObserver(scheduleFit);
     observer.observe(host);
-    window.addEventListener('resize', fitAndResize);
-    requestAnimationFrame(() => requestAnimationFrame(fitAndResize));
+    observer.observe(resource.container);
+    window.addEventListener('resize', scheduleFit);
+    document.fonts?.ready.then(scheduleFit).catch(() => undefined);
+    scheduleFit();
     return () => {
+      disposed = true;
       observer.disconnect();
-      window.removeEventListener('resize', fitAndResize);
+      window.removeEventListener('resize', scheduleFit);
       if (host.contains(resource.container)) host.removeChild(resource.container);
     };
   }, [roomId, processId]);
 
-  return <div className="terminal" ref={hostRef} />;
+  return <div className="terminal"><div className="terminal-host" ref={hostRef} /></div>;
 }
 
 function GitPanel({ room }: { room: Room }) {

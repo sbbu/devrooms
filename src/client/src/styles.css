@@ -99,9 +99,9 @@ p { color: var(--muted); margin: 0; }
 .pill.clone { color: #bac5ff; }
 .pill.error { color: var(--danger); }
 header nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
-.terminal { display: flex; flex: 1; min-height: 0; padding: 12px; }
-.terminal-surface { display: flex; flex: 1; min-height: 0; min-width: 0; }
-.terminal .xterm { border: 1px solid var(--line); border-radius: 14px; flex: 1; height: 100%; min-height: 0; overflow: hidden; padding: 0; width: 100%; }
+.terminal { background: #090b10; border-radius: 14px; box-shadow: 0 0 0 1px var(--line); display: flex; flex: 1; margin: 12px; min-height: 0; min-width: 0; overflow: hidden; }
+.terminal-host, .terminal-surface { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.terminal .xterm { flex: 1; height: 100%; min-height: 0; min-width: 0; overflow: hidden; padding: 0; width: 100%; }
 .error { background: #4b1119; border: 1px solid #963343; border-radius: 10px; color: #ffd1d8; margin: 12px; padding: 10px; }
 .error.inline { margin: 0; }
 .empty, .hint { color: var(--muted); padding: 18px; }
@@ -147,8 +147,7 @@ header nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end
 .status.exited { background: #242b37; color: #aeb8cc; }
 .status.lost { background: #4a3414; color: #ffd28a; }
 .attached-terminal { border: 1px solid var(--line); border-radius: 14px; display: flex; min-height: 0; overflow: hidden; }
-.attached-terminal .terminal { padding: 0; }
-.attached-terminal .terminal .xterm { border: 0; border-radius: 0; }
+.attached-terminal .terminal { border-radius: 0; box-shadow: none; margin: 0; }
 
 @media (max-width: 1000px) {
   aside { width: 280px; }
