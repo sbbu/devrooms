@@ -23,6 +23,15 @@ Room directories live at `~/devrooms/<project>/<room>` unless `DEVROOMS_ROOMS_RO
 
 The registry stores only project/room metadata. Repository contents live in real git clones, not in the state file.
 
+## Health / metadata
+
+The daemon exposes:
+
+- `GET /api/health` — liveness plus runtime metadata.
+- `GET /api/meta` — runtime metadata, state paths, and project/room/process counts.
+
+Smoke tests verify these endpoints plus the built UI and SPA fallback are served from `dist/client`.
+
 ## Security boundary
 
 The daemon currently binds to `127.0.0.1` only. Do not expose it on a network interface until auth exists. It can run arbitrary commands inside rooms through PTYs and agent launchers.

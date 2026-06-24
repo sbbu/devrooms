@@ -11,7 +11,11 @@ import pty from '@homebridge/node-pty-prebuilt-multiarch';
 const DEVROOMS_HOME = process.env.DEVROOMS_HOME ?? path.join(os.homedir(), '.devrooms');
 const ROOMS_ROOT = process.env.DEVROOMS_ROOMS_ROOT ?? path.join(os.homedir(), 'devrooms');
 const STATE_PATH = path.join(DEVROOMS_HOME, 'state.json');
-const PORT = Number(process.env.PORT ?? 4317);
+const APP_NAME = 'devrooms';
+const APP_VERSION = '0.0.1';
+const STARTED_AT = now();
+const BIND_HOST = '127.0.0.1';
+const PORT = parsePort(process.env.PORT);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -73,6 +77,15 @@ const processes = new Map<string, ManagedProcess>();
 
 function now() {
   return new Date().toISOString();
+}
+
+function parsePort(value: string | undefined) {
+  if (!value) return 4317;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error(`invalid PORT: ${value}`);
+  }
+  return parsed;
 }
 
 function slugify(value: string) {
@@ -445,6 +458,36 @@ function processSummary(proc: ManagedProcess) {
   };
 }
 
+function metaSummary(state: State) {
+  return {
+    name: APP_NAME,
+    version: APP_VERSION,
+    startedAt: STARTED_AT,
+    uptimeSeconds: Math.round(process.uptime()),
+    pid: process.pid,
+    platform: process.platform,
+    node: process.version,
+    bindHost: BIND_HOST,
+    port: PORT,
+    home: DEVROOMS_HOME,
+    roomsRoot: ROOMS_ROOT,
+    projectCount: Object.keys(state.projects).length,
+    roomCount: Object.keys(state.rooms).length,
+    processCount: processes.size,
+    runningProcessCount: [...processes.values()].filter((proc) => proc.status === 'running').length,
+  };
+}
+
+function killAllProcesses() {
+  for (const proc of processes.values()) {
+    if (proc.status === 'running') {
+      proc.pty.kill();
+      proc.status = 'exited';
+      proc.exitedAt = now();
+    }
+  }
+}
+
 function wirePtySocket(ws: WebSocket, child: pty.IPty, replay = '') {
   if (replay) ws.send(JSON.stringify({ type: 'output', data: replay }));
   const disposable = child.onData((data) => {
@@ -468,7 +511,13 @@ async function main() {
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/health', async (_req, res) => {
-    res.json({ ok: true, home: DEVROOMS_HOME, roomsRoot: ROOMS_ROOT, version: 1 });
+    const state = await getState();
+    res.json({ ok: true, ...metaSummary(state) });
+  });
+
+  app.get('/api/meta', async (_req, res) => {
+    const state = await getState();
+    res.json(metaSummary(state));
   });
 
   app.get('/api/presets', async (_req, res) => {
@@ -660,11 +709,19 @@ async function main() {
     }
   });
 
-  server.listen(PORT, '127.0.0.1', () => {
-    console.log(`devrooms listening on http://127.0.0.1:${PORT}`);
+  server.listen(PORT, BIND_HOST, () => {
+    console.log(`devrooms listening on http://${BIND_HOST}:${PORT}`);
     console.log(`state: ${STATE_PATH}`);
     console.log(`rooms: ${ROOMS_ROOT}`);
   });
+
+  const shutdown = () => {
+    killAllProcesses();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1000).unref();
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 main().catch((error) => {

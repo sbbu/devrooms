@@ -38,6 +38,12 @@ Open:
 http://127.0.0.1:4317
 ```
 
+Daemon metadata:
+
+```text
+http://127.0.0.1:4317/api/meta
+```
+
 Dev mode:
 
 ```bash

@@ -31,6 +31,13 @@ async function request(base, route, options = {}) {
   return data;
 }
 
+async function text(base, route) {
+  const res = await fetch(`${base}${route}`);
+  const body = await res.text();
+  if (!res.ok) throw new Error(`GET ${route}: ${res.status} ${body.slice(0, 120)}`);
+  return body;
+}
+
 async function waitForHealth(base) {
   for (let i = 0; i < 80; i++) {
     try { return await request(base, '/api/health'); } catch { await delay(100); }
@@ -81,7 +88,14 @@ server.stderr.on('data', (chunk) => { logs += chunk.toString(); });
 
 try {
   const base = `http://127.0.0.1:${port}`;
-  await waitForHealth(base);
+  const health = await waitForHealth(base);
+  if (health.name !== 'devrooms' || health.port !== port || health.bindHost !== '127.0.0.1') throw new Error(`bad health metadata: ${JSON.stringify(health)}`);
+  const indexHtml = await text(base, '/');
+  if (!indexHtml.includes('<div id="root"></div>')) throw new Error('built UI html was not served at /');
+  const spaHtml = await text(base, '/rooms/does-not-exist');
+  if (!spaHtml.includes('<div id="root"></div>')) throw new Error('SPA fallback did not serve index.html');
+  const meta = await request(base, '/api/meta');
+  if (meta.name !== 'devrooms' || meta.projectCount !== 0 || meta.roomCount !== 0) throw new Error(`bad meta payload: ${JSON.stringify(meta)}`);
   const presets = await request(base, '/api/presets');
   if (!Array.isArray(presets.presets) || !presets.presets.some((preset) => preset.id === 'hermes-tui')) throw new Error('missing hermes preset');
 
