@@ -11,6 +11,7 @@ type GitFile = { index: string; workingTree: string; path: string; raw: string; 
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number }; branches: string[]; head: string };
 type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited' | 'lost'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
 type AgentPreset = { id: string; label: string; description: string; command: string; available: boolean };
+type Meta = { name: string; version: string; startedAt: string; uptimeSeconds: number; pid: number; platform: string; node: string; bindHost: string; port: number; home: string; roomsRoot: string; projectCount: number; roomCount: number; processCount: number; runningProcessCount: number };
 
 type Tab = 'terminal' | 'git' | 'subagents';
 
@@ -28,6 +29,14 @@ function wsUrl(path: string) {
 
 function shortPath(value: string) {
   return value.replace(/^\/Users\/[^/]+/, '~');
+}
+
+function formatUptime(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 1) return `${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 1) return `${minutes}m`;
+  return `${hours}h ${minutes % 60}m`;
 }
 
 function fileStatusLabel(file: GitFile) {
@@ -231,6 +240,7 @@ function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -249,11 +259,12 @@ function App() {
   const runningCount = roomProcesses.filter((proc) => proc.status === 'running').length;
 
   async function refresh() {
-    const [projectData, presetData] = await Promise.all([
+    const [projectData, presetData, metaData] = await Promise.all([
       api<{ projects: Project[]; rooms: Room[] }>('/api/projects'),
       api<{ presets: AgentPreset[] }>('/api/presets'),
+      api<Meta>('/api/meta'),
     ]);
-    setProjects(projectData.projects); setRooms(projectData.rooms); setPresets(presetData.presets);
+    setProjects(projectData.projects); setRooms(projectData.rooms); setPresets(presetData.presets); setMeta(metaData);
     if (!selectedProjectId && projectData.projects[0]) setSelectedProjectId(projectData.projects[0].id);
     if (!selectedRoomId && projectData.rooms[0]) setSelectedRoomId(projectData.rooms[0].id);
   }
@@ -314,6 +325,19 @@ function App() {
     <main>
       <aside>
         <div className="brand-block"><div className="brand">devrooms</div><p>durable clone rooms for agentic work</p></div>
+        <section className="daemon-card">
+          <div className="section-head"><h2>daemon</h2><span className="live-dot">healthy</span></div>
+          {meta ? (
+            <div className="daemon-grid">
+              <span>version</span><strong>{meta.version}</strong>
+              <span>bind</span><strong>{meta.bindHost}:{meta.port}</strong>
+              <span>uptime</span><strong>{formatUptime(meta.uptimeSeconds)}</strong>
+              <span>pid</span><strong>{meta.pid}</strong>
+              <span>state</span><strong title={meta.home}>{shortPath(meta.home)}</strong>
+              <span>rooms</span><strong title={meta.roomsRoot}>{shortPath(meta.roomsRoot)}</strong>
+            </div>
+          ) : <div className="empty compact">daemon metadata unavailable</div>}
+        </section>
         <section>
           <div className="section-head"><h2>projects</h2><span>{projects.length}</span></div>
           {projects.map((project) => <button className={selectedProject?.id === project.id ? 'nav active' : 'nav'} key={project.id} onClick={() => setSelectedProjectId(project.id)}><strong>{project.name}</strong><span>{project.defaultBranch}</span></button>)}
@@ -342,6 +366,7 @@ function App() {
           </div>
           <div className="room-stats">
             <span>{selectedProject?.name ?? 'no project'}</span>
+            <span>{meta ? `daemon ${meta.port}` : 'daemon ?'}</span>
             <span>{selectedRoom?.branch ?? selectedProject?.defaultBranch ?? 'no branch'}</span>
             <span>{runningCount} running</span>
             <span>{roomProcesses.length} process{roomProcesses.length === 1 ? '' : 'es'}</span>

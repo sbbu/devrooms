@@ -54,6 +54,12 @@ aside {
 .brand-block { margin-bottom: 22px; }
 .brand { font-size: 28px; font-weight: 820; letter-spacing: -0.055em; }
 .brand-block p { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+.daemon-card { background: #090d14; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 18px; padding: 12px; }
+.daemon-grid { display: grid; gap: 7px 10px; grid-template-columns: auto minmax(0, 1fr); }
+.daemon-grid span { color: var(--faint); font-size: 11px; text-transform: uppercase; }
+.daemon-grid strong { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-dot { align-items: center; display: inline-flex; gap: 5px; }
+.live-dot::before { background: var(--accent-2); border-radius: 999px; box-shadow: 0 0 12px color-mix(in oklab, var(--accent-2), transparent 30%); content: ''; display: inline-block; height: 6px; width: 6px; }
 section { margin-bottom: 26px; }
 .section-head { align-items: center; display: flex; justify-content: space-between; margin-bottom: 10px; }
 h2 { color: var(--muted); font-size: 11px; letter-spacing: 0.14em; margin: 0; text-transform: uppercase; }
@@ -95,6 +101,7 @@ header nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end
 .error { background: #4b1119; border: 1px solid #963343; border-radius: 10px; color: #ffd1d8; margin: 12px; padding: 10px; }
 .error.inline { margin: 0; }
 .empty, .hint { color: var(--muted); padding: 18px; }
+.empty.compact { padding: 6px 0 0; }
 .empty.splash { align-items: center; display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 8px; }
 .room-state { text-align: center; }
 .room-state.creating strong { color: var(--warning); }

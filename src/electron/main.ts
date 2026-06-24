@@ -10,6 +10,24 @@ const shouldUseExternalServer = Boolean(process.env.DEVROOMS_SERVER_URL);
 let daemon: ChildProcessWithoutNullStreams | undefined;
 let mainWindow: BrowserWindow | undefined;
 
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char]!);
+}
+
+function statusPage(title: string, body: string) {
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>
+body{margin:0;background:#06070a;color:#eef3ff;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh}
+main{width:min(680px,calc(100vw - 48px));background:#0c1017;border:1px solid #263144;border-radius:18px;padding:24px;box-shadow:0 24px 80px #0008}
+h1{font-size:24px;margin:0 0 10px;letter-spacing:-.04em}p{color:#8f9bb2;line-height:1.5}code{background:#090d14;border:1px solid #263144;border-radius:8px;color:#94f0c4;padding:2px 5px}pre{white-space:pre-wrap;background:#090d14;border:1px solid #263144;border-radius:12px;color:#ffd1d8;padding:12px}
+</style></head><body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+async function loadStatusPage(title: string, body: string) {
+  await mainWindow?.loadURL(statusPage(title, body));
+}
+
 async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -50,7 +68,6 @@ async function ensureDaemon() {
 }
 
 async function createWindow() {
-  await ensureDaemon();
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 940,
@@ -69,7 +86,17 @@ async function createWindow() {
     void shell.openExternal(url);
     return { action: 'deny' };
   });
-  await mainWindow.loadURL(serverUrl);
+  await loadStatusPage('Starting Devrooms', `<p>Starting local daemon at <code>${escapeHtml(serverUrl)}</code>…</p>`);
+  try {
+    await ensureDaemon();
+    await mainWindow.loadURL(serverUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    await loadStatusPage(
+      'Devrooms daemon failed to start',
+      `<p>The desktop shell is open, but the local daemon is not healthy at <code>${escapeHtml(serverUrl)}</code>.</p><pre>${escapeHtml(message)}</pre><p>Fix the daemon issue or quit and reopen Devrooms.</p>`,
+    );
+  }
 }
 
 app.whenReady().then(() => {
