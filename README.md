@@ -22,8 +22,6 @@ See:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - [`docs/ROADMAP.md`](docs/ROADMAP.md)
 
-Native packaging and deeper local Hermes Client integration come next; the daemon and room model are the foundation.
-
 ## Quick start
 
 ```bash
@@ -56,26 +54,45 @@ Desktop shell:
 pnpm run desktop
 ```
 
-Build a local macOS `.app` bundle:
+Build and install a local macOS `.app` bundle:
+
+```bash
+pnpm run install:mac
+```
+
+The app is copied to:
+
+```text
+/Applications/Devrooms.app
+```
+
+For CI or local verification without touching `/Applications`:
 
 ```bash
 pnpm run package:mac
 pnpm run smoke:package
-```
-
-The app is written to:
-
-```text
-release/mac-arm64/Devrooms.app
-```
-
-Install locally:
-
-```bash
-cp -R release/mac-arm64/Devrooms.app /Applications/
+pnpm run smoke:install
 ```
 
 The packaged app starts its own local daemon on `127.0.0.1:4317` unless `DEVROOMS_SERVER_URL` points at an already-running daemon.
+
+Use:
+
+1. Open `Devrooms.app`.
+2. Create a project with a git repo URL/path.
+3. Clone a room. Room creation is async; the room shows `creating`, then `idle` or `error`.
+4. Use the tabs:
+   - `terminal` for an interactive shell in the room clone.
+   - `git` for status, diffs, stage/unstage, commit, branch, fetch/pull/push.
+   - `subagents` to launch and attach agent/process PTYs.
+
+Uninstall:
+
+```bash
+rm -rf /Applications/Devrooms.app ~/.devrooms ~/devrooms
+```
+
+`~/.devrooms` stores the registry state. `~/devrooms` stores the actual room clones.
 
 Claude design critique pass, when Claude Code is installed/logged in:
 
@@ -102,3 +119,7 @@ Override with:
 ```bash
 DEVROOMS_HOME=/path/to/state DEVROOMS_ROOMS_ROOT=/path/to/rooms pnpm start
 ```
+
+## Security
+
+The daemon binds to `127.0.0.1` only. Do not expose it on a network interface until auth exists; it can run arbitrary commands inside room clones through terminals and agent launchers.

@@ -15,8 +15,8 @@ Devrooms is daily-driver ready when a user can install it, open it like a deskto
 - [x] running process / agent state is obvious at room and project level.
 - [x] git panel covers daily commit loop: status, unstaged/staged diff, stage/unstage, commit, branch, fetch/pull/push.
 - [x] smoke covers install-adjacent paths: package build, daemon restart, process persistence downgrade, failed clone/delete.
-- [ ] README has install/start/use/uninstall instructions.
-- [ ] local-only security boundary is documented and enforced.
+- [x] README has install/start/use/uninstall instructions.
+- [x] local-only security boundary is documented and enforced.
 
 ## Nice after first daily-driver build
 
