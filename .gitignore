@@ -6,3 +6,4 @@ dist/
 *.log
 .devrooms/
 docs/design-reviews/*.md
+release/

@@ -20,3 +20,5 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - run: pnpm run package:mac
+      - run: pnpm run smoke:package

@@ -11,6 +11,8 @@
     "dev:ui": "vite --host 127.0.0.1",
     "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.electron.json && vite build",
     "desktop": "pnpm build && electron dist/electron/main.js",
+    "package:mac": "pnpm build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --config electron-builder.yml",
+    "smoke:package": "node scripts/package-smoke.mjs",
     "start": "node dist/server.js",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "smoke": "node scripts/smoke.mjs",
@@ -45,6 +47,7 @@
     "@vitejs/plugin-react": "^5.1.2",
     "concurrently": "^9.2.1",
     "electron": "^42.4.1",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.7"

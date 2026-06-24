@@ -36,9 +36,9 @@ async function ensureDaemon() {
   if (shouldUseExternalServer) throw new Error(`External Devrooms server is not reachable: ${serverUrl}`);
 
   const serverEntry = path.resolve(__dirname, '../server.js');
-  daemon = spawn('node', [serverEntry], {
+  daemon = spawn(process.execPath, [serverEntry], {
     cwd: path.resolve(__dirname, '..'),
-    env: { ...process.env, PORT: String(port) },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(port) },
   });
   daemon.stdout.on('data', (chunk) => process.stdout.write(`[devroomsd] ${chunk}`));
   daemon.stderr.on('data', (chunk) => process.stderr.write(`[devroomsd] ${chunk}`));

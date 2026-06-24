@@ -1,0 +1,24 @@
+appId: dev.sbbu.devrooms
+productName: Devrooms
+copyright: Copyright © 2026 sbbu
+
+asar: false
+
+files:
+  - package.json
+  - dist/**
+  - node_modules/**
+
+npmRebuild: false
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dir
+      arch:
+        - arm64
+
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+directories:
+  output: release

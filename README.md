@@ -56,6 +56,27 @@ Desktop shell:
 pnpm run desktop
 ```
 
+Build a local macOS `.app` bundle:
+
+```bash
+pnpm run package:mac
+pnpm run smoke:package
+```
+
+The app is written to:
+
+```text
+release/mac-arm64/Devrooms.app
+```
+
+Install locally:
+
+```bash
+cp -R release/mac-arm64/Devrooms.app /Applications/
+```
+
+The packaged app starts its own local daemon on `127.0.0.1:4317` unless `DEVROOMS_SERVER_URL` points at an already-running daemon.
+
 Claude design critique pass, when Claude Code is installed/logged in:
 
 ```bash
