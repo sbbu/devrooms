@@ -12,7 +12,7 @@ Devrooms is daily-driver ready when a user can install it, open it like a deskto
 - [x] room creation is async and cancel/delete-safe while cloning.
 - [x] room deletion is deliberate and removes/archives the clone safely.
 - [x] process records survive daemon restart with a clear `lost` state for PTYs that cannot be reattached.
-- [ ] running process / agent state is obvious at room and project level.
+- [x] running process / agent state is obvious at room and project level.
 - [ ] git panel covers daily commit loop: status, unstaged/staged diff, stage/unstage, commit, branch, fetch/pull/push.
 - [x] smoke covers install-adjacent paths: package build, daemon restart, process persistence downgrade, failed clone/delete.
 - [ ] README has install/start/use/uninstall instructions.

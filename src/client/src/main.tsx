@@ -12,6 +12,8 @@ type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirt
 type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited' | 'lost'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
 type AgentPreset = { id: string; label: string; description: string; command: string; available: boolean };
 type Meta = { name: string; version: string; startedAt: string; uptimeSeconds: number; pid: number; platform: string; node: string; bindHost: string; port: number; home: string; roomsRoot: string; projectCount: number; roomCount: number; processCount: number; runningProcessCount: number };
+type ProcessCount = { lost: number; running: number; total: number };
+type ProcessCounts = Record<string, ProcessCount>;
 
 type Tab = 'terminal' | 'git' | 'subagents';
 
@@ -37,6 +39,13 @@ function formatUptime(seconds: number) {
   const hours = Math.floor(minutes / 60);
   if (hours < 1) return `${minutes}m`;
   return `${hours}h ${minutes % 60}m`;
+}
+
+function processCountLabel(count?: ProcessCount) {
+  if (!count?.total) return '';
+  if (count.running) return `${count.running} running`;
+  if (count.lost) return `${count.lost} lost`;
+  return `${count.total} done`;
 }
 
 function fileStatusLabel(file: GitFile) {
@@ -241,6 +250,7 @@ function App() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
+  const [processCounts, setProcessCounts] = useState<ProcessCounts>({});
   const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -256,15 +266,28 @@ function App() {
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
   const projectRooms = useMemo(() => rooms.filter((room) => room.projectId === selectedProject?.id), [rooms, selectedProject]);
   const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId) ?? projectRooms[0], [rooms, selectedRoomId, projectRooms]);
+  const projectProcessCounts = useMemo(() => {
+    const out: ProcessCounts = {};
+    for (const room of rooms) {
+      const count = processCounts[room.id];
+      if (!count) continue;
+      const current = out[room.projectId] ?? { lost: 0, running: 0, total: 0 };
+      current.lost += count.lost;
+      current.running += count.running;
+      current.total += count.total;
+      out[room.projectId] = current;
+    }
+    return out;
+  }, [processCounts, rooms]);
   const runningCount = roomProcesses.filter((proc) => proc.status === 'running').length;
 
   async function refresh() {
     const [projectData, presetData, metaData] = await Promise.all([
-      api<{ projects: Project[]; rooms: Room[] }>('/api/projects'),
+      api<{ processCounts: ProcessCounts; projects: Project[]; rooms: Room[] }>('/api/projects'),
       api<{ presets: AgentPreset[] }>('/api/presets'),
       api<Meta>('/api/meta'),
     ]);
-    setProjects(projectData.projects); setRooms(projectData.rooms); setPresets(presetData.presets); setMeta(metaData);
+    setProjects(projectData.projects); setRooms(projectData.rooms); setProcessCounts(projectData.processCounts ?? {}); setPresets(presetData.presets); setMeta(metaData);
     if (!selectedProjectId && projectData.projects[0]) setSelectedProjectId(projectData.projects[0].id);
     if (!selectedRoomId && projectData.rooms[0]) setSelectedRoomId(projectData.rooms[0].id);
   }
@@ -340,7 +363,10 @@ function App() {
         </section>
         <section>
           <div className="section-head"><h2>projects</h2><span>{projects.length}</span></div>
-          {projects.map((project) => <button className={selectedProject?.id === project.id ? 'nav active' : 'nav'} key={project.id} onClick={() => setSelectedProjectId(project.id)}><strong>{project.name}</strong><span>{project.defaultBranch}</span></button>)}
+          {projects.map((project) => {
+            const label = processCountLabel(projectProcessCounts[project.id]);
+            return <button className={selectedProject?.id === project.id ? 'nav active' : 'nav'} key={project.id} onClick={() => setSelectedProjectId(project.id)}><strong>{project.name}</strong><span>{label ? `${project.defaultBranch} · ${label}` : project.defaultBranch}</span></button>;
+          })}
           <div className="form-card">
             <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="project name" />
             <input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="git repo url" />
@@ -350,7 +376,10 @@ function App() {
         </section>
         <section>
           <div className="section-head"><h2>rooms</h2><span>{projectRooms.length}</span></div>
-          {projectRooms.map((room) => <button className={selectedRoom?.id === room.id ? 'nav active' : 'nav'} key={room.id} onClick={() => setSelectedRoomId(room.id)}><strong>{room.name}</strong><span className={`pill ${room.status}`}>{room.status}</span></button>)}
+          {projectRooms.map((room) => {
+            const label = processCountLabel(processCounts[room.id]);
+            return <button className={selectedRoom?.id === room.id ? 'nav active' : 'nav'} key={room.id} onClick={() => setSelectedRoomId(room.id)}><strong>{room.name}</strong><span className="nav-meta"><span className={`pill ${room.status}`}>{room.status}</span>{label && <span className="process-badge">{label}</span>}</span></button>;
+          })}
           <div className="form-card">
             <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
             <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />

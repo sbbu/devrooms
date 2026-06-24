@@ -595,6 +595,18 @@ function processSummary(proc: ManagedProcess | ProcessRecord) {
   };
 }
 
+function processCountsByRoom(state: State) {
+  const counts: Record<string, { lost: number; running: number; total: number }> = {};
+  for (const proc of Object.values(state.processes)) {
+    const current = counts[proc.roomId] ?? { lost: 0, running: 0, total: 0 };
+    current.total += 1;
+    if (proc.status === 'running') current.running += 1;
+    if (proc.status === 'lost') current.lost += 1;
+    counts[proc.roomId] = current;
+  }
+  return counts;
+}
+
 function metaSummary(state: State) {
   return {
     name: APP_NAME,
@@ -664,7 +676,7 @@ async function main() {
 
   app.get('/api/projects', async (_req, res) => {
     const state = await getState();
-    res.json({ projects: Object.values(state.projects), rooms: Object.values(state.rooms) });
+    res.json({ projects: Object.values(state.projects), rooms: Object.values(state.rooms), processCounts: processCountsByRoom(state) });
   });
 
   app.post('/api/projects', async (req, res) => {

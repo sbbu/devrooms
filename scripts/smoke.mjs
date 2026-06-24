@@ -166,12 +166,16 @@ try {
   processes = await request(base, `/api/rooms/${room.id}/processes`);
   proc = processes.processes.find((item) => item.id === longRunning.process.id);
   if (!proc || proc.status !== 'running') throw new Error(`long-running process was not persisted as running: ${JSON.stringify(proc)}`);
+  let registry = await request(base, '/api/projects');
+  if (registry.processCounts?.[room.id]?.running !== 1) throw new Error(`missing running process count: ${JSON.stringify(registry.processCounts)}`);
   await stopServer('SIGKILL');
   server = startServer();
   await waitForHealth(base);
   processes = await request(base, `/api/rooms/${room.id}/processes`);
   proc = processes.processes.find((item) => item.id === longRunning.process.id);
   if (!proc || proc.status !== 'lost' || !proc.logTail.includes('PTY is no longer attached')) throw new Error(`expected lost persisted process after restart: ${JSON.stringify(proc)}`);
+  registry = await request(base, '/api/projects');
+  if (registry.processCounts?.[room.id]?.lost !== 1) throw new Error(`missing lost process count: ${JSON.stringify(registry.processCounts)}`);
   await processWebsocketProbe(port, longRunning.process.id, 'process lost');
   await request(base, `/api/processes/${longRunning.process.id}`, { method: 'DELETE' });
 

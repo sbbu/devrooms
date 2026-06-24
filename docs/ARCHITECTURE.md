@@ -30,6 +30,8 @@ The daemon exposes:
 - `GET /api/health` — liveness plus runtime metadata.
 - `GET /api/meta` — runtime metadata, state paths, and project/room/process counts.
 
+The project registry response also includes per-room process counts so the sidebar can surface running/lost agent state without opening each room.
+
 Smoke tests verify these endpoints plus the built UI and SPA fallback are served from `dist/client`.
 
 ## Security boundary
