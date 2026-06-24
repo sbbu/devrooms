@@ -1,0 +1,42 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #07080b; color: #f1f5ff; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, select { font: inherit; }
+button { background: #1c2230; border: 1px solid #303a4e; border-radius: 10px; color: #f1f5ff; cursor: pointer; padding: 8px 10px; }
+button:hover { background: #263147; }
+button:disabled { cursor: not-allowed; opacity: 0.5; }
+input, select { width: 100%; background: #0d111a; border: 1px solid #303a4e; border-radius: 10px; color: #f1f5ff; padding: 9px 10px; }
+main { display: flex; height: 100vh; overflow: hidden; }
+aside { width: 310px; background: #0d1017; border-right: 1px solid #252b38; padding: 18px; overflow-y: auto; }
+.brand { font-size: 26px; font-weight: 800; letter-spacing: -0.04em; margin-bottom: 20px; }
+section { margin-bottom: 26px; }
+h2 { color: #8992a6; font-size: 12px; letter-spacing: 0.12em; margin: 0 0 10px; text-transform: uppercase; }
+.nav { align-items: center; display: flex; justify-content: space-between; margin-bottom: 8px; text-align: left; width: 100%; }
+.nav.active, header button.active { background: #3451ff; border-color: #6478ff; }
+aside input { margin-bottom: 8px; }
+.workspace { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+header { align-items: center; border-bottom: 1px solid #252b38; display: flex; gap: 20px; justify-content: space-between; min-height: 90px; padding: 16px 22px; }
+h1 { font-size: 24px; margin: 0 0 4px; }
+p { color: #8992a6; margin: 0; }
+header nav { display: flex; gap: 8px; }
+.terminal { flex: 1; min-height: 0; padding: 12px; }
+.terminal .xterm { height: 100%; }
+.error { background: #4b1119; border: 1px solid #963343; border-radius: 10px; color: #ffd1d8; margin: 12px; padding: 10px; }
+.empty, .hint { color: #8992a6; padding: 20px; }
+.splash { margin: auto; }
+.toolbar, .launcher, .diff-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+.toolbar select { width: 220px; }
+.git-panel, .subagents { display: flex; flex: 1; flex-direction: column; min-height: 0; padding: 12px; }
+.git-meta { color: #9aa6bd; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 8px; }
+.git-layout { border: 1px solid #252b38; border-radius: 12px; display: grid; flex: 1; grid-template-columns: 320px 1fr; min-height: 0; overflow: hidden; }
+.files { background: #0b0e15; border-right: 1px solid #252b38; overflow: auto; padding: 8px; }
+.file { border-radius: 8px; display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
+.file.selected { background: #263147; }
+.badge { color: #8fe388; margin-right: 8px; }
+.diff { display: flex; flex-direction: column; min-width: 0; }
+.diff pre, .op-log { background: #080a0f; color: #d6deff; flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin: 0; overflow: auto; padding: 12px; white-space: pre-wrap; }
+.op-log { border: 1px solid #252b38; border-radius: 10px; flex: 0 0 auto; margin-top: 10px; max-height: 140px; }
+.process-list { display: grid; gap: 8px; margin-bottom: 12px; }
+.process { align-items: center; background: #101620; border: 1px solid #252b38; border-radius: 12px; display: grid; gap: 8px; grid-template-columns: auto auto 1fr auto; padding: 8px; }
+.process.selected { border-color: #6478ff; }
+.launcher input { flex: 1; }
