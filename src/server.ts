@@ -2,7 +2,7 @@ import express from 'express';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -89,6 +89,8 @@ type AgentPreset = {
 };
 
 const processes = new Map<string, ManagedProcess>();
+const cloneJobs = new Map<string, ChildProcess>();
+const deletedRoomTokens = new Set<string>();
 
 function now() {
   return new Date().toISOString();
@@ -110,6 +112,10 @@ function slugify(value: string) {
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 64);
+}
+
+function roomToken(room: Room) {
+  return `${room.id}:${room.createdAt}`;
 }
 
 function requireString(value: unknown, field: string) {
@@ -228,13 +234,14 @@ async function assertPathInside(parent: string, child: string) {
   }
 }
 
-function run(command: string, args: string[], cwd: string, opts: { timeoutMs?: number } = {}): Promise<RunResult> {
+function run(command: string, args: string[], cwd: string, opts: { onChild?: (child: ChildProcess) => void; timeoutMs?: number } = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    opts.onChild?.(child);
     let stdout = '';
     let stderr = '';
     const limit = 2_000_000;
@@ -368,12 +375,28 @@ async function detectDefaultBranch(repoUrl: string) {
   return match?.[1];
 }
 
+async function assertRepoReachable(repoUrl: string, defaultBranch: string) {
+  let result: RunResult;
+  try {
+    result = await run('git', ['ls-remote', '--heads', repoUrl, defaultBranch], process.cwd(), { timeoutMs: 30_000 });
+  } catch (error) {
+    throw new HttpError(400, `repository is not reachable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (result.exitCode !== 0) {
+    throw new HttpError(400, result.stderr || result.stdout || 'repository is not reachable');
+  }
+  if (!result.stdout.trim()) {
+    throw new HttpError(400, `default branch not found in repository: ${defaultBranch}`);
+  }
+}
+
 async function createProject(body: unknown) {
   const input = body as Record<string, unknown>;
   const name = requireString(input.name, 'name');
   const repoUrl = requireString(input.repoUrl, 'repoUrl');
   const suppliedBranch = typeof input.defaultBranch === 'string' && input.defaultBranch.trim() ? input.defaultBranch.trim() : undefined;
   const defaultBranch = suppliedBranch ?? (await detectDefaultBranch(repoUrl)) ?? 'main';
+  await assertRepoReachable(repoUrl, defaultBranch);
   const id = slugify(typeof input.id === 'string' && input.id.trim() ? input.id : name);
   if (!id) throw new HttpError(400, 'project id is empty after slugification');
 
@@ -434,7 +457,10 @@ async function materializeRoom(project: Project, room: Room) {
   try {
     await fs.mkdir(path.dirname(room.path), { recursive: true });
     const cloneArgs = room.branch ? ['clone', '--branch', room.branch, project.repoUrl, room.path] : ['clone', project.repoUrl, room.path];
-    const clone = await run('git', cloneArgs, path.dirname(room.path), { timeoutMs: 15 * 60_000 });
+    const clone = await run('git', cloneArgs, path.dirname(room.path), {
+      onChild: (child) => cloneJobs.set(room.id, child),
+      timeoutMs: 15 * 60_000,
+    });
     if (clone.exitCode !== 0) throw new Error(clone.stderr || clone.stdout || 'git clone failed');
     room.status = 'idle';
     room.updatedAt = now();
@@ -442,10 +468,12 @@ async function materializeRoom(project: Project, room: Room) {
     room.status = 'error';
     room.error = error instanceof Error ? error.message : String(error);
     room.updatedAt = now();
+  } finally {
+    cloneJobs.delete(room.id);
   }
 
   const latest = await getState();
-  if (!latest.rooms[room.id]) return;
+  if (deletedRoomTokens.has(roomToken(room)) || latest.rooms[room.id]?.createdAt !== room.createdAt) return;
   latest.rooms[room.id] = room;
   await saveState(latest);
 }
@@ -456,6 +484,10 @@ async function deleteRoom(roomId: string, body: unknown) {
   const force = input.force === true;
   const state = await getState();
   const room = getRoom(state, roomId);
+  deletedRoomTokens.add(roomToken(room));
+  const cloneJob = cloneJobs.get(roomId);
+  if (cloneJob && !cloneJob.killed) cloneJob.kill('SIGTERM');
+  cloneJobs.delete(roomId);
   const running = [...processes.values()].filter((proc) => proc.roomId === roomId && proc.status === 'running');
   if (running.length && !force) {
     throw new HttpError(409, `room has ${running.length} running process(es); kill them or pass force=true`);

@@ -178,10 +178,24 @@ try {
   await roomWebsocketProbe(port, room.id, room.path);
   await request(base, `/api/rooms/${room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
 
-  await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Broken', repoUrl: path.join(root, 'missing-repo') }) });
-  const failedCreate = await request(base, '/api/projects/broken/rooms', { method: 'POST', body: JSON.stringify({ name: 'bad' }) });
+  let rejectedBadProject = false;
+  try {
+    await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Broken', repoUrl: path.join(root, 'missing-repo') }) });
+  } catch (error) {
+    rejectedBadProject = String(error).includes('400');
+  }
+  if (!rejectedBadProject) throw new Error('project creation did not reject an unreachable repository');
+
+  const cancelCreate = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'cancel', branch: 'definitely-missing' }) });
+  if (cancelCreate.room.status !== 'creating') throw new Error(`expected cancel clone to start as creating, got ${cancelCreate.room.status}`);
+  await request(base, `/api/rooms/${cancelCreate.room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
+  await delay(300);
+  const afterCancel = await request(base, '/api/projects/sample/rooms');
+  if (afterCancel.rooms.some((item) => item.id === cancelCreate.room.id)) throw new Error('deleted creating room was resurrected');
+
+  const failedCreate = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'bad', branch: 'definitely-missing' }) });
   if (failedCreate.room.status !== 'creating') throw new Error(`expected failed clone to start as creating, got ${failedCreate.room.status}`);
-  const failedRoom = await waitForRoomStatus(base, 'broken', failedCreate.room.id, 'error');
+  const failedRoom = await waitForRoomStatus(base, 'sample', failedCreate.room.id, 'error');
   if (!failedRoom.error) throw new Error('failed clone did not record an error');
   await request(base, `/api/rooms/${failedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
   console.log('devrooms smoke ok');

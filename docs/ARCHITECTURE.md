@@ -42,6 +42,8 @@ A room is a full clone of a project repository. This avoids the state leakage an
 
 Room creation is asynchronous: `POST /api/projects/:projectId/rooms` returns `202` with a `creating` room, then the daemon clones in the background and updates the room to `idle` or `error`. The UI polls the registry so long clones do not freeze the app.
 
+Project creation validates repository reachability and the default branch with `git ls-remote`. Deleting a `creating` room cancels the tracked clone process and tombstones that room generation so late clone completion cannot resurrect stale state.
+
 ## Process model
 
 Processes are PTYs spawned inside a room. The daemon persists process records in the state file. Live PTYs cannot be resurrected after daemon death, so any record that was `running` on startup is downgraded to `lost` with a clear log marker. Graceful shutdown marks live processes `exited`.
