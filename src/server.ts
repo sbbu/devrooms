@@ -366,10 +366,15 @@ async function createRoom(projectId: string, body: unknown) {
   state.rooms[id] = room;
   await saveState(state);
 
+  void materializeRoom(project, room).catch((error) => console.error('room clone failed', error));
+  return room;
+}
+
+async function materializeRoom(project: Project, room: Room) {
   try {
-    await fs.mkdir(path.dirname(roomPath), { recursive: true });
-    const cloneArgs = branch ? ['clone', '--branch', branch, project.repoUrl, roomPath] : ['clone', project.repoUrl, roomPath];
-    const clone = await run('git', cloneArgs, path.dirname(roomPath), { timeoutMs: 15 * 60_000 });
+    await fs.mkdir(path.dirname(room.path), { recursive: true });
+    const cloneArgs = room.branch ? ['clone', '--branch', room.branch, project.repoUrl, room.path] : ['clone', project.repoUrl, room.path];
+    const clone = await run('git', cloneArgs, path.dirname(room.path), { timeoutMs: 15 * 60_000 });
     if (clone.exitCode !== 0) throw new Error(clone.stderr || clone.stdout || 'git clone failed');
     room.status = 'idle';
     room.updatedAt = now();
@@ -380,11 +385,9 @@ async function createRoom(projectId: string, body: unknown) {
   }
 
   const latest = await getState();
-  latest.rooms[id] = room;
+  if (!latest.rooms[room.id]) return;
+  latest.rooms[room.id] = room;
   await saveState(latest);
-
-  if (room.status === 'error') throw new HttpError(500, room.error ?? 'room creation failed');
-  return room;
 }
 
 async function deleteRoom(roomId: string, body: unknown) {
@@ -549,7 +552,7 @@ async function main() {
 
   app.post('/api/projects/:projectId/rooms', async (req, res) => {
     try {
-      res.json({ room: await createRoom(req.params.projectId, req.body) });
+      res.status(202).json({ room: await createRoom(req.params.projectId, req.body) });
     } catch (error) {
       apiError(error, res);
     }

@@ -259,6 +259,11 @@ function App() {
   }
   useEffect(() => { refresh().catch((err) => setError(err.message)); }, []);
 
+  useEffect(() => {
+    const timer = setInterval(() => refresh().catch(() => undefined), 5000);
+    return () => clearInterval(timer);
+  }, [selectedProjectId, selectedRoomId]);
+
   async function refreshRoomProcesses(roomId: string) {
     const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
     setRoomProcesses(data.processes);

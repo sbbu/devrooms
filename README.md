@@ -10,7 +10,7 @@ Devrooms currently ships as a daemon + web UI, plus an Electron shell:
 
 - project registry
 - room registry
-- room creation via full `git clone`
+- room creation via async full `git clone`
 - remote PTY terminal streamed into the browser with xterm.js
 - git branch/status/diff/stage/unstage/commit/fetch/pull/push controls
 - subagent/process launcher with presets for Hermes, Codex, Claude Code, and OpenCode

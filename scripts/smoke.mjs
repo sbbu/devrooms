@@ -45,6 +45,17 @@ async function waitForHealth(base) {
   throw new Error('server did not become healthy');
 }
 
+async function waitForRoomIdle(base, projectId, roomId) {
+  for (let i = 0; i < 120; i++) {
+    const data = await request(base, `/api/projects/${projectId}/rooms`);
+    const room = data.rooms.find((item) => item.id === roomId);
+    if (room?.status === 'idle') return room;
+    if (room?.status === 'error') throw new Error(`room clone failed: ${room.error}`);
+    await delay(100);
+  }
+  throw new Error(`room did not become idle: ${roomId}`);
+}
+
 async function websocketProbe(port, roomId, expected) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/rooms/${roomId}/terminal`);
   let out = '';
@@ -100,7 +111,9 @@ try {
   if (!Array.isArray(presets.presets) || !presets.presets.some((preset) => preset.id === 'hermes-tui')) throw new Error('missing hermes preset');
 
   await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Sample', repoUrl: src }) });
-  const { room } = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'alpha' }) });
+  const created = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'alpha' }) });
+  if (created.room.status !== 'creating') throw new Error(`expected async room creation, got ${created.room.status}`);
+  const room = await waitForRoomIdle(base, 'sample', created.room.id);
   const readme = path.join(roomsRoot, 'sample', 'alpha', 'README.md');
   writeFileSync(readme, 'hello\nworld\n');
 

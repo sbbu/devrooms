@@ -40,6 +40,8 @@ The daemon currently binds to `127.0.0.1` only. Do not expose it on a network in
 
 A room is a full clone of a project repository. This avoids the state leakage and tooling friction that happen with git worktrees in large JS monorepos.
 
+Room creation is asynchronous: `POST /api/projects/:projectId/rooms` returns `202` with a `creating` room, then the daemon clones in the background and updates the room to `idle` or `error`. The UI polls the registry so long clones do not freeze the app.
+
 ## Process model
 
 Processes are PTYs spawned inside a room. The daemon keeps in-memory logs and statuses while it is running. Future work should persist process records across daemon restarts, but PTYs themselves cannot be resurrected after daemon death.
