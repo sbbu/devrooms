@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.electron.json && vite build",
     "desktop": "pnpm build && electron dist/electron/main.js",
     "install:mac": "bash scripts/install-mac.sh",
-    "package:mac": "pnpm build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --config electron-builder.yml",
+    "package:mac": "pnpm build && pnpm run rebuild:native && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --config electron-builder.yml",
     "smoke:install": "node scripts/install-smoke.mjs",
     "smoke:package": "node scripts/package-smoke.mjs",
     "start": "node dist/server.js",
@@ -20,7 +20,8 @@
     "smoke": "node scripts/smoke.mjs",
     "design:review": "bash scripts/claude-design-review.sh",
     "test": "pnpm run check && pnpm run build && pnpm run smoke",
-    "lint": "pnpm check"
+    "lint": "pnpm check",
+    "rebuild:native": "node scripts/rebuild-native.mjs"
   },
   "keywords": [
     "agents",
@@ -52,6 +53,14 @@
     "electron-builder": "^26.15.3",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vite": "^7.2.7"
+    "vite": "^7.2.7",
+    "@electron/rebuild": "^4.0.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@homebridge/node-pty-prebuilt-multiarch",
+      "electron",
+      "esbuild"
+    ]
   }
 }
