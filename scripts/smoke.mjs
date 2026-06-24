@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -89,6 +89,7 @@ async function processWebsocketProbe(port, processId, expected) {
 
 const root = mkdtempSync(path.join(tmpdir(), 'devrooms-smoke-'));
 const src = path.join(root, 'src');
+const remote = path.join(root, 'remote.git');
 const home = path.join(root, 'home');
 const roomsRoot = path.join(root, 'rooms');
 mkdirSync(src, { recursive: true });
@@ -98,6 +99,9 @@ run('git', ['config', 'user.email', 'smoke@example.invalid'], src);
 writeFileSync(path.join(src, 'README.md'), 'hello\n');
 run('git', ['add', 'README.md'], src);
 run('git', ['commit', '-m', 'initial sample'], src);
+run('git', ['init', '--bare', remote], root);
+run('git', ['remote', 'add', 'origin', remote], src);
+run('git', ['push', '-u', 'origin', 'main'], src);
 
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
@@ -135,7 +139,7 @@ try {
   const presets = await request(base, '/api/presets');
   if (!Array.isArray(presets.presets) || !presets.presets.some((preset) => preset.id === 'hermes-tui')) throw new Error('missing hermes preset');
 
-  await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Sample', repoUrl: src }) });
+  await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Sample', repoUrl: remote }) });
   const created = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'alpha' }) });
   if (created.room.status !== 'creating') throw new Error(`expected async room creation, got ${created.room.status}`);
   const room = await waitForRoomStatus(base, 'sample', created.room.id, 'idle');
@@ -150,11 +154,30 @@ try {
   await request(base, `/api/rooms/${room.id}/git/stage`, { method: 'POST', body: JSON.stringify({ path: 'README.md' }) });
   const staged = await request(base, `/api/rooms/${room.id}/git/diff?path=README.md`);
   if (!staged.stagedDiff.includes('+world')) throw new Error('staged diff did not include edited line');
+  await request(base, `/api/rooms/${room.id}/git/unstage`, { method: 'POST', body: JSON.stringify({ path: 'README.md' }) });
+  const unstaged = await request(base, `/api/rooms/${room.id}/git/diff?path=README.md`);
+  if (unstaged.stagedDiff || !unstaged.diff.includes('+world')) throw new Error('unstage did not move the change back to the working tree');
+  await request(base, `/api/rooms/${room.id}/git/stage`, { method: 'POST', body: JSON.stringify({ path: 'README.md' }) });
   run('git', ['config', 'user.name', 'Smoke'], path.join(roomsRoot, 'sample', 'alpha'));
   run('git', ['config', 'user.email', 'smoke@example.invalid'], path.join(roomsRoot, 'sample', 'alpha'));
   await request(base, `/api/rooms/${room.id}/git/commit`, { method: 'POST', body: JSON.stringify({ message: 'update readme' }) });
   status = await request(base, `/api/rooms/${room.id}/git/status`);
   if (status.status.dirtyCount !== 0) throw new Error(`expected clean tree after commit, saw ${status.status.dirtyCount}`);
+  await request(base, `/api/rooms/${room.id}/git/push`, { method: 'POST' });
+
+  await request(base, `/api/rooms/${room.id}/git/checkout-new`, { method: 'POST', body: JSON.stringify({ branch: 'feature/smoke' }) });
+  status = await request(base, `/api/rooms/${room.id}/git/status`);
+  if (!status.status.branch.startsWith('feature/smoke')) throw new Error(`expected feature/smoke branch, got ${status.status.branch}`);
+  await request(base, `/api/rooms/${room.id}/git/checkout`, { method: 'POST', body: JSON.stringify({ branch: 'main' }) });
+
+  run('git', ['pull', '--ff-only', 'origin', 'main'], src);
+  writeFileSync(path.join(src, 'REMOTE.md'), 'from remote\n');
+  run('git', ['add', 'REMOTE.md'], src);
+  run('git', ['commit', '-m', 'remote update'], src);
+  run('git', ['push', 'origin', 'main'], src);
+  await request(base, `/api/rooms/${room.id}/git/fetch`, { method: 'POST' });
+  await request(base, `/api/rooms/${room.id}/git/pull`, { method: 'POST' });
+  if (!readFileSync(path.join(roomsRoot, 'sample', 'alpha', 'REMOTE.md'), 'utf8').includes('from remote')) throw new Error('pull did not bring down remote update');
 
   const started = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'smoke', command: 'pwd && git status --short' }) });
   await delay(1000);
