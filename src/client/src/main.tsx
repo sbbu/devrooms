@@ -356,9 +356,16 @@ function App() {
         </header>
         {error && <div className="error">{error}</div>}
         {!selectedRoom && <div className="empty splash"><strong>No room selected.</strong><span>Create a project, then clone a room. Each room is a full repository clone.</span></div>}
-        {selectedRoom && tab === 'terminal' && <TerminalPane roomId={selectedRoom.id} />}
-        {selectedRoom && tab === 'git' && <GitPanel room={selectedRoom} />}
-        {selectedRoom && tab === 'subagents' && <SubagentsPanel room={selectedRoom} presets={presets} />}
+        {selectedRoom && selectedRoom.status !== 'idle' && (
+          <div className={`empty splash room-state ${selectedRoom.status}`}>
+            <strong>{selectedRoom.status === 'creating' ? 'Cloning room…' : 'Room clone failed'}</strong>
+            <span>{selectedRoom.status === 'creating' ? 'Devrooms is cloning the repository in the background. This view will refresh automatically.' : selectedRoom.error}</span>
+            <button onClick={() => refresh()}>refresh now</button>
+          </div>
+        )}
+        {selectedRoom?.status === 'idle' && tab === 'terminal' && <TerminalPane roomId={selectedRoom.id} />}
+        {selectedRoom?.status === 'idle' && tab === 'git' && <GitPanel room={selectedRoom} />}
+        {selectedRoom?.status === 'idle' && tab === 'subagents' && <SubagentsPanel room={selectedRoom} presets={presets} />}
       </section>
     </main>
   );

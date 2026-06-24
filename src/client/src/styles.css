@@ -96,6 +96,9 @@ header nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end
 .error.inline { margin: 0; }
 .empty, .hint { color: var(--muted); padding: 18px; }
 .empty.splash { align-items: center; display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 8px; }
+.room-state { text-align: center; }
+.room-state.creating strong { color: var(--warning); }
+.room-state.error strong { color: var(--danger); }
 .panel-grid { display: grid; gap: 10px; grid-template-rows: auto auto auto 1fr auto auto; min-height: 0; padding: 12px; }
 .panel-toolbar, .launcher, .diff-actions, .branch-create, .commit-row { display: flex; gap: 8px; }
 .panel-toolbar select { width: 220px; }

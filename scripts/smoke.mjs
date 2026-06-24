@@ -45,15 +45,15 @@ async function waitForHealth(base) {
   throw new Error('server did not become healthy');
 }
 
-async function waitForRoomIdle(base, projectId, roomId) {
+async function waitForRoomStatus(base, projectId, roomId, wantedStatus) {
   for (let i = 0; i < 120; i++) {
     const data = await request(base, `/api/projects/${projectId}/rooms`);
     const room = data.rooms.find((item) => item.id === roomId);
-    if (room?.status === 'idle') return room;
-    if (room?.status === 'error') throw new Error(`room clone failed: ${room.error}`);
+    if (room?.status === wantedStatus) return room;
+    if (room?.status === 'error' && wantedStatus !== 'error') throw new Error(`room clone failed: ${room.error}`);
     await delay(100);
   }
-  throw new Error(`room did not become idle: ${roomId}`);
+  throw new Error(`room did not become ${wantedStatus}: ${roomId}`);
 }
 
 async function websocketProbe(port, roomId, expected) {
@@ -113,7 +113,7 @@ try {
   await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Sample', repoUrl: src }) });
   const created = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'alpha' }) });
   if (created.room.status !== 'creating') throw new Error(`expected async room creation, got ${created.room.status}`);
-  const room = await waitForRoomIdle(base, 'sample', created.room.id);
+  const room = await waitForRoomStatus(base, 'sample', created.room.id, 'idle');
   const readme = path.join(roomsRoot, 'sample', 'alpha', 'README.md');
   writeFileSync(readme, 'hello\nworld\n');
 
@@ -139,6 +139,13 @@ try {
 
   await websocketProbe(port, room.id, room.path);
   await request(base, `/api/rooms/${room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
+
+  await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Broken', repoUrl: path.join(root, 'missing-repo') }) });
+  const failedCreate = await request(base, '/api/projects/broken/rooms', { method: 'POST', body: JSON.stringify({ name: 'bad' }) });
+  if (failedCreate.room.status !== 'creating') throw new Error(`expected failed clone to start as creating, got ${failedCreate.room.status}`);
+  const failedRoom = await waitForRoomStatus(base, 'broken', failedCreate.room.id, 'error');
+  if (!failedRoom.error) throw new Error('failed clone did not record an error');
+  await request(base, `/api/rooms/${failedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
   console.log('devrooms smoke ok');
 } catch (error) {
   console.error(logs);
