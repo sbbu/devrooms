@@ -6,14 +6,15 @@ It gives each project durable room-style workspaces: full repo clones with a ter
 
 ## Current v0
 
-This first cut is a working web daemon/UI:
+Devrooms currently ships as a daemon + web UI:
 
 - project registry
 - room registry
 - room creation via full `git clone`
 - remote PTY terminal streamed into the browser with xterm.js
-- git branch/status/diff/stage/unstage/fetch/pull/push endpoints
-- subagent/process launcher with attachable PTY logs
+- git branch/status/diff/stage/unstage/commit/fetch/pull/push controls
+- subagent/process launcher with presets for Hermes, Codex, Claude Code, and OpenCode
+- smoke coverage for project creation, room cloning, git operations, process launch, and websocket terminal attachment
 
 Electron/local Hermes Client integration comes next; the daemon and room model are the foundation.
 
@@ -21,7 +22,7 @@ Electron/local Hermes Client integration comes next; the daemon and room model a
 
 ```bash
 pnpm install
-pnpm build
+pnpm test
 pnpm start
 ```
 
@@ -54,5 +55,3 @@ Override with:
 ```bash
 DEVROOMS_HOME=/path/to/state DEVROOMS_ROOMS_ROOT=/path/to/rooms pnpm start
 ```
-
-

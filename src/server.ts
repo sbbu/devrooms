@@ -2,7 +2,7 @@ import express from 'express';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -37,6 +37,7 @@ type Room = {
 };
 
 type State = {
+  version: 1;
   projects: Record<string, Project>;
   rooms: Record<string, Room>;
 };
@@ -58,6 +59,14 @@ type RunResult = {
   exitCode: number;
   stdout: string;
   stderr: string;
+};
+
+type AgentPreset = {
+  id: string;
+  label: string;
+  description: string;
+  command: string;
+  available: boolean;
 };
 
 const processes = new Map<string, ManagedProcess>();
@@ -88,14 +97,27 @@ class HttpError extends Error {
   }
 }
 
+function emptyState(): State {
+  return { version: 1, projects: {}, rooms: {} };
+}
+
+function normalizeState(raw: unknown): State {
+  const candidate = raw as Partial<State>;
+  return {
+    version: 1,
+    projects: candidate.projects ?? {},
+    rooms: candidate.rooms ?? {},
+  };
+}
+
 async function ensureState(): Promise<State> {
   await fs.mkdir(DEVROOMS_HOME, { recursive: true });
   await fs.mkdir(ROOMS_ROOT, { recursive: true });
   try {
     const raw = await fs.readFile(STATE_PATH, 'utf8');
-    return JSON.parse(raw) as State;
+    return normalizeState(JSON.parse(raw));
   } catch {
-    const state: State = { projects: {}, rooms: {} };
+    const state = emptyState();
     await saveState(state);
     return state;
   }
@@ -125,7 +147,9 @@ function getRoom(state: State, roomId: string) {
 }
 
 async function assertPathInside(parent: string, child: string) {
-  const rel = path.relative(parent, child);
+  const parentPath = path.resolve(parent);
+  const childPath = path.resolve(child);
+  const rel = path.relative(parentPath, childPath);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new HttpError(400, 'path escaped room root');
   }
@@ -183,13 +207,77 @@ function parseStatus(raw: string) {
       workingTree: line.slice(1, 2),
       path: line.slice(3),
       raw: line,
+      staged: line.slice(0, 1) !== ' ' && line.slice(0, 1) !== '?',
+      dirty: line.slice(1, 2) !== ' ' || line.startsWith('??'),
     }));
-  return { branch, files, raw };
+  return { branch, files, raw, dirtyCount: files.length };
 }
 
 async function listBranches(room: Room) {
   const result = await runGit(room, ['branch', '--format=%(refname:short)']);
   return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+async function currentBranch(room: Room) {
+  const result = await runGit(room, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return result.stdout.trim();
+}
+
+async function fileDiff(room: Room, file: string) {
+  await assertPathInside(room.path, path.join(room.path, file));
+  const status = await runGit(room, ['status', '--porcelain=v1', '--', file]);
+  const isUntracked = status.stdout.startsWith('??');
+  const unstaged = isUntracked
+    ? await run('git', ['diff', '--no-index', '--', '/dev/null', file], room.path)
+    : await runGit(room, ['diff', '--', file]);
+  const staged = await runGit(room, ['diff', '--cached', '--', file]);
+  return {
+    path: file,
+    diff: unstaged.stdout,
+    stagedDiff: staged.stdout,
+    status: status.stdout.trim(),
+  };
+}
+
+function commandExists(cmd: string) {
+  return spawnSync('sh', ['-lc', `command -v ${cmd} >/dev/null 2>&1`], { stdio: 'ignore' }).status === 0;
+}
+
+function agentPresets(): AgentPreset[] {
+  const hasHermes = commandExists('hermes');
+  const hasCodex = commandExists('codex');
+  const hasClaude = commandExists('claude');
+  const hasOpenCode = commandExists('opencode');
+  return [
+    {
+      id: 'hermes-tui',
+      label: 'Hermes TUI',
+      description: 'Open a Hermes chat session inside this room.',
+      command: 'hermes chat --tui --accept-hooks --pass-session-id',
+      available: hasHermes,
+    },
+    {
+      id: 'codex-tui',
+      label: 'Codex TUI',
+      description: 'Open interactive Codex in this room.',
+      command: 'codex',
+      available: hasCodex,
+    },
+    {
+      id: 'claude-code',
+      label: 'Claude Code',
+      description: 'Open Claude Code in this room. Uses npx/pnpm dlx fallback if claude is not installed globally.',
+      command: hasClaude ? 'claude' : 'pnpm dlx @anthropic-ai/claude-code',
+      available: hasClaude || commandExists('pnpm'),
+    },
+    {
+      id: 'opencode',
+      label: 'OpenCode',
+      description: 'Open OpenCode in this room.',
+      command: 'opencode',
+      available: hasOpenCode,
+    },
+  ];
 }
 
 function apiError(error: unknown, res: express.Response) {
@@ -201,11 +289,18 @@ function apiError(error: unknown, res: express.Response) {
   res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
 }
 
+async function detectDefaultBranch(repoUrl: string) {
+  const result = await run('git', ['ls-remote', '--symref', repoUrl, 'HEAD'], process.cwd(), { timeoutMs: 30_000 }).catch(() => undefined);
+  const match = result?.stdout.match(/ref: refs\/heads\/([^\t\n ]+)\s+HEAD/);
+  return match?.[1];
+}
+
 async function createProject(body: unknown) {
   const input = body as Record<string, unknown>;
   const name = requireString(input.name, 'name');
   const repoUrl = requireString(input.repoUrl, 'repoUrl');
-  const defaultBranch = typeof input.defaultBranch === 'string' && input.defaultBranch.trim() ? input.defaultBranch.trim() : 'main';
+  const suppliedBranch = typeof input.defaultBranch === 'string' && input.defaultBranch.trim() ? input.defaultBranch.trim() : undefined;
+  const defaultBranch = suppliedBranch ?? (await detectDefaultBranch(repoUrl)) ?? 'main';
   const id = slugify(typeof input.id === 'string' && input.id.trim() ? input.id : name);
   if (!id) throw new HttpError(400, 'project id is empty after slugification');
 
@@ -279,6 +374,30 @@ async function createRoom(projectId: string, body: unknown) {
   return room;
 }
 
+async function deleteRoom(roomId: string, body: unknown) {
+  const input = body as Record<string, unknown>;
+  const deleteFiles = input.deleteFiles === true;
+  const force = input.force === true;
+  const state = await getState();
+  const room = getRoom(state, roomId);
+  const running = [...processes.values()].filter((proc) => proc.roomId === roomId && proc.status === 'running');
+  if (running.length && !force) {
+    throw new HttpError(409, `room has ${running.length} running process(es); kill them or pass force=true`);
+  }
+  for (const proc of running) {
+    proc.pty.kill();
+    proc.status = 'exited';
+    proc.exitedAt = now();
+  }
+  delete state.rooms[roomId];
+  await saveState(state);
+  if (deleteFiles) {
+    await assertPathInside(ROOMS_ROOT, room.path);
+    await fs.rm(room.path, { recursive: true, force: true });
+  }
+  return { room, deleteFiles, killed: running.length };
+}
+
 function spawnProcess(room: Room, command: string, name?: string) {
   const id = `proc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const shell = process.env.SHELL ?? '/bin/zsh';
@@ -349,7 +468,11 @@ async function main() {
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/health', async (_req, res) => {
-    res.json({ ok: true, home: DEVROOMS_HOME, roomsRoot: ROOMS_ROOT });
+    res.json({ ok: true, home: DEVROOMS_HOME, roomsRoot: ROOMS_ROOT, version: 1 });
+  });
+
+  app.get('/api/presets', async (_req, res) => {
+    res.json({ presets: agentPresets() });
   });
 
   app.get('/api/projects', async (_req, res) => {
@@ -383,6 +506,14 @@ async function main() {
     }
   });
 
+  app.delete('/api/rooms/:roomId', async (req, res) => {
+    try {
+      res.json({ ok: true, ...(await deleteRoom(req.params.roomId, req.body ?? {})) });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
   app.get('/api/rooms/:roomId/git/status', async (req, res) => {
     try {
       const state = await getState();
@@ -400,10 +531,7 @@ async function main() {
       const state = await getState();
       const room = getRoom(state, req.params.roomId);
       const file = requireString(req.query.path, 'path');
-      await assertPathInside(room.path, path.join(room.path, file));
-      const diff = await runGit(room, ['diff', '--', file]);
-      const staged = await runGit(room, ['diff', '--cached', '--', file]);
-      res.json({ path: file, diff: diff.stdout, stagedDiff: staged.stdout });
+      res.json(await fileDiff(room, file));
     } catch (error) {
       apiError(error, res);
     }
@@ -428,10 +556,17 @@ async function main() {
       } else if (op === 'pull') {
         result = await runGit(room, ['pull', '--ff-only'], { timeoutMs: 5 * 60_000 });
       } else if (op === 'push') {
-        result = await runGit(room, ['push'], { timeoutMs: 5 * 60_000 });
+        const branch = await currentBranch(room);
+        result = await runGit(room, ['push', '-u', 'origin', branch], { timeoutMs: 5 * 60_000 });
       } else if (op === 'checkout') {
         const branch = requireString(req.body?.branch, 'branch');
         result = await runGit(room, ['checkout', branch]);
+      } else if (op === 'checkout-new') {
+        const branch = requireString(req.body?.branch, 'branch');
+        result = await runGit(room, ['checkout', '-b', branch]);
+      } else if (op === 'commit') {
+        const message = requireString(req.body?.message, 'message');
+        result = await runGit(room, ['commit', '-m', message]);
       } else {
         throw new HttpError(404, `unknown git operation: ${op}`);
       }
@@ -462,7 +597,7 @@ async function main() {
   app.delete('/api/processes/:processId', async (req, res) => {
     const proc = processes.get(req.params.processId);
     if (!proc) return res.status(404).json({ error: 'unknown process' });
-    proc.pty.kill();
+    if (proc.status === 'running') proc.pty.kill();
     proc.status = 'exited';
     proc.exitedAt = now();
     res.json({ ok: true });

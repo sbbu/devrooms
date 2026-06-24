@@ -11,6 +11,8 @@
     "build": "tsc -p tsconfig.server.json && vite build",
     "start": "node dist/server.js",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "pnpm run check && pnpm run build && pnpm run smoke",
     "lint": "pnpm check"
   },
   "keywords": ["agents", "developer-tools", "hermes", "terminal", "git"],
