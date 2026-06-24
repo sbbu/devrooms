@@ -3,7 +3,7 @@
 ## Shape
 
 ```text
-Devrooms UI
+Devrooms Electron shell or browser UI
   -> HTTP/WebSocket daemon on 127.0.0.1
       -> state file
       -> room directories
@@ -11,7 +11,9 @@ Devrooms UI
       -> PTY processes
 ```
 
-The current implementation is intentionally small: one Node daemon, one React/Vite client, and xterm.js terminals.
+The current implementation is intentionally small: one Node daemon, one React/Vite client, one Electron shell, and xterm.js terminals.
+
+The Electron shell starts `dist/server.js` unless `DEVROOMS_SERVER_URL` points at an already-running daemon.
 
 ## State
 

@@ -15,12 +15,13 @@ A project has many durable rooms. Each room is a full repository clone with its 
 - git status/diff/stage/unstage/commit/fetch/pull/push
 - branch checkout/create
 - agent preset launcher for Hermes, Codex, Claude Code, OpenCode
+- Electron shell that starts or attaches to the local daemon
 - smoke tests covering core daemon, git, process, and websocket paths
 
 ## Next slices
 
-1. **Electron shell**
-   - package the current web UI as a desktop app
+1. **Desktop packaging**
+   - package the Electron shell for macOS
    - local tray/menu lifecycle for the daemon
    - preserve fast local typing
 

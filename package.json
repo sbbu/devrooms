@@ -4,19 +4,27 @@
   "private": false,
   "description": "Project-aware dev rooms for Hermes and coding agents.",
   "type": "module",
+  "main": "dist/electron/main.js",
   "scripts": {
     "dev": "concurrently -n daemon,ui -c blue,magenta \"pnpm dev:daemon\" \"pnpm dev:ui\"",
     "dev:daemon": "tsx watch src/server.ts",
     "dev:ui": "vite --host 127.0.0.1",
-    "build": "tsc -p tsconfig.server.json && vite build",
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.electron.json && vite build",
+    "desktop": "pnpm build && electron dist/electron/main.js",
     "start": "node dist/server.js",
-    "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "smoke": "node scripts/smoke.mjs",
     "design:review": "bash scripts/claude-design-review.sh",
     "test": "pnpm run check && pnpm run build && pnpm run smoke",
     "lint": "pnpm check"
   },
-  "keywords": ["agents", "developer-tools", "hermes", "terminal", "git"],
+  "keywords": [
+    "agents",
+    "developer-tools",
+    "hermes",
+    "terminal",
+    "git"
+  ],
   "author": "sbbu",
   "license": "MIT",
   "dependencies": {
@@ -36,6 +44,7 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.2",
     "concurrently": "^9.2.1",
+    "electron": "^42.4.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.7"
