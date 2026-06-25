@@ -13,7 +13,9 @@ const baseEnv = {
   ...process.env,
   PORT: String(port),
   DEVROOMS_PROJECT_PATH: process.env.DEVROOMS_PROJECT_PATH || root,
-  DEVROOMS_PROJECT_NAME: process.env.DEVROOMS_PROJECT_NAME || 'devrooms',
+  // Lowercase-normalize: the brand is always lowercase "devrooms", and this also
+  // neutralizes any stale capitalized value inherited from an older process tree.
+  DEVROOMS_PROJECT_NAME: (process.env.DEVROOMS_PROJECT_NAME || 'devrooms').toLowerCase(),
 };
 const children = [];
 

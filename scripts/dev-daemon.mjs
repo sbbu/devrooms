@@ -7,7 +7,9 @@ const port = Number(process.env.DEVROOMS_PORT || process.env.PORT || 4317);
 const env = {
   ...process.env,
   DEVROOMS_PROJECT_PATH: process.env.DEVROOMS_PROJECT_PATH || root,
-  DEVROOMS_PROJECT_NAME: process.env.DEVROOMS_PROJECT_NAME || 'devrooms',
+  // Lowercase-normalize: the brand is always lowercase "devrooms", and this also
+  // neutralizes any stale capitalized value inherited from an older process tree.
+  DEVROOMS_PROJECT_NAME: (process.env.DEVROOMS_PROJECT_NAME || 'devrooms').toLowerCase(),
 };
 
 // Kill any previous daemon for this repo so daemons never pile up. Only the
