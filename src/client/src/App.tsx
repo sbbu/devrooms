@@ -610,12 +610,13 @@ function GitPanel({ room }: { room: Room }) {
   const [newBranch, setNewBranch] = useState('');
   const [syncing, setSyncing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [pushRejected, setPushRejected] = useState(false);
 
   async function refresh() {
     try { setStatus(await api<GitStatus>(`/api/rooms/${room.id}/git/status`)); setError(null); }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   }
-  useEffect(() => { refresh(); }, [room.id]);
+  useEffect(() => { setPushRejected(false); refresh(); }, [room.id]);
   useEffect(() => {
     const onFocus = () => { refresh(); };
     window.addEventListener('focus', onFocus);
@@ -628,10 +629,23 @@ function GitPanel({ room }: { room: Room }) {
     try {
       const result = await api<{ stdout: string; stderr: string }>(`/api/rooms/${room.id}/git/${op}`, { method: 'POST', body: JSON.stringify(body ?? {}) });
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
+      setPushRejected(false);
       await refresh();
       setReloadKey((value) => value + 1); // re-fetch history so ↑ markers update
       return true;
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); return false; }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Non-fast-forward push: origin moved on. Flip the button to pull & merge
+      // (GitHub Desktop style) — pull merges, then the merge can be pushed.
+      if (op === 'push' && /rejected|fetch first|non-fast-forward|failed to push/i.test(message)) {
+        setPushRejected(true);
+        setError(null);
+        setNote('origin has new commits — pull & merge, then push again');
+      } else {
+        setError(message);
+      }
+      return false;
+    }
   }
 
   const branch = status?.status.branch.split('...')[0] ?? room.branch ?? '';
@@ -641,12 +655,16 @@ function GitPanel({ room }: { room: Room }) {
   const hasUpstream = status?.status.hasUpstream ?? false;
   // One adaptive sync action, in git terms: pull when behind (incl. diverged),
   // otherwise push when there are unpushed commits, otherwise fetch to check.
-  const syncVerb = behind > 0 ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
+  // A rejected push (origin ahead) forces pull & merge even when our cached
+  // behind-count is stale — we haven't fetched since origin moved on.
+  const mergePull = pushRejected || (behind > 0 && unpushed > 0);
+  const syncVerb = (behind > 0 || pushRejected) ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
   const syncOp = syncVerb;
+  const syncLabel = syncVerb === 'fetch' ? '⟳ fetch' : syncVerb === 'pull' ? (mergePull ? 'pull & merge' : 'pull') : 'push';
   const syncTitle = syncVerb === 'fetch'
     ? 'git fetch --all --prune'
     : syncVerb === 'pull'
-      ? `git pull origin ${branch}`
+      ? (mergePull ? 'origin has new commits — git pull (merge), then push' : `git pull origin ${branch}`)
       : hasUpstream ? `git push origin ${branch}` : `git push -u origin ${branch} (new branch)`;
   async function doSync() { setSyncing(true); try { await gitOp(syncOp); } finally { setSyncing(false); } }
 
@@ -654,7 +672,7 @@ function GitPanel({ room }: { room: Room }) {
     <div className="git">
       <div className="cmdrow">
         <button className="sync" disabled={syncing} onClick={doSync} title={syncTitle}>
-          <span className="sync-verb">{syncing ? 'syncing…' : syncVerb === 'fetch' ? '⟳ fetch' : syncVerb}</span>
+          <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
           {!syncing && (behind > 0 || unpushed > 0) && (
             <span className="sync-counts">
               {behind > 0 && <span className="dn">↓{behind}</span>}
