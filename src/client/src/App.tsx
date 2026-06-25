@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -49,6 +49,17 @@ function compactProc(count?: ProcessCount) {
   if (count.running) return `${count.running} run`;
   if (count.lost) return `${count.lost} lost`;
   return `${count.total} done`;
+}
+
+// A 2-char monogram for the mini rail: first letter of the first two segments
+// (split on separators and camelCase), e.g. "api-gateway" → "AG", "devrooms" → "DE".
+function projectInitials(name: string) {
+  const segments = name
+    .split(/[-_\s/.]+/)
+    .flatMap((segment) => segment.split(/(?<=[a-z0-9])(?=[A-Z])/))
+    .filter(Boolean);
+  const letters = segments.length >= 2 ? segments[0][0] + segments[1][0] : name.replace(/[^a-z0-9]/gi, '');
+  return (letters || name).slice(0, 2).toUpperCase();
 }
 
 const STATUS_GLYPH: Record<Room['status'], string> = { idle: '●', creating: '◐', error: '✕' };
@@ -719,10 +730,36 @@ export function App() {
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Sidebar collapse: railPref is the persisted user intent; forcedMini is a
+  // transient width override that never mutates intent (see toggleRail/effects).
+  const [railPref, setRailPref] = useState<'full' | 'mini'>(() => {
+    try { return localStorage.getItem('devrooms.rail') === 'mini' ? 'mini' : 'full'; } catch { return 'full'; }
+  });
+  const [forcedMini, setForcedMini] = useState(() => window.matchMedia('(max-width: 720px)').matches);
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
   const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId), [rooms, selectedRoomId]);
   const runningCount = roomProcesses.filter((proc) => proc.status === 'running').length;
+
+  // Effective collapse = user intent OR a too-narrow viewport. The width override
+  // is never written back to railPref, so widening restores the saved intent.
+  const miniRail = forcedMini || railPref === 'mini';
+  // Single toggle for both the button and the Cmd/Ctrl+B shortcut. While the
+  // viewport forces mini, the toggle is inert so it never mutates saved intent.
+  const toggleRail = useCallback(() => {
+    if (forcedMini) return;
+    const next = railPref === 'mini' ? 'full' : 'mini';
+    try { localStorage.setItem('devrooms.rail', next); } catch { /* storage may be unavailable */ }
+    setRailPref(next);
+    // Collapsing while a rail control holds focus would otherwise keep the
+    // sidebar peeked open (focus); drop focus so the collapse is honored at once.
+    if (next === 'mini') (document.activeElement as HTMLElement | null)?.blur?.();
+  }, [railPref, forcedMini]);
+  function expandRail() {
+    try { localStorage.setItem('devrooms.rail', 'full'); } catch { /* storage may be unavailable */ }
+    setRailPref('full');
+  }
+  const shortcutHint = /mac|darwin/i.test(window.devrooms?.platform ?? navigator.platform ?? '') ? '⌘B' : 'Ctrl+B';
 
   async function refresh() {
     const [projectData, presetData, metaData] = await Promise.all([
@@ -735,6 +772,30 @@ export function App() {
     if (!selectedRoomId && projectData.rooms[0]) setSelectedRoomId(projectData.rooms[0].id);
   }
   useEffect(() => { refresh().catch((err) => setError(err.message)); }, []);
+
+  // Force the mini rail below 720px (browser only — Electron clamps to 980).
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 720px)');
+    const onChange = () => setForcedMini(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  // Cmd/Ctrl+B toggles the rail, but never while typing in a field or the terminal
+  // (xterm focuses a TEXTAREA, so Ctrl+B still reaches tmux unharmed).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'b') return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+      event.preventDefault();
+      toggleRail();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggleRail]);
 
   useEffect(() => {
     const timer = setInterval(() => refresh().catch(() => undefined), 5000);
@@ -837,33 +898,49 @@ export function App() {
         </span>
       </div>
 
-      <div className="split">
+      <div className="split" data-rail={miniRail ? 'mini' : 'full'}>
         <aside className="sidebar">
-          <div className="rule">rooms<span className="count">{rooms.length}</span></div>
+          <div className="rule">rooms<span className="count">{rooms.length}</span>
+            <button
+              className="rail-toggle"
+              disabled={forcedMini}
+              aria-label={miniRail ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-expanded={!miniRail}
+              title={forcedMini ? 'widen the window to pin the sidebar open' : miniRail ? `expand sidebar (${shortcutHint})` : `collapse sidebar (${shortcutHint})`}
+              onClick={toggleRail}
+            />
+          </div>
           {projects.length ? (
             <div className="tree">
               {projects.map((project) => {
                 const projectRooms = rooms.filter((room) => room.projectId === project.id);
                 return (
                   <Fragment key={project.id}>
-                    <button className={selectedProject?.id === project.id ? 'node project-node proj-active' : 'node project-node'} onClick={() => setSelectedProjectId(project.id)}>
+                    <button className={selectedProject?.id === project.id ? 'node project-node proj-active' : 'node project-node'} aria-label={`${project.name} · ${project.defaultBranch}`} title={`${project.name} · ${project.defaultBranch}`} onClick={() => setSelectedProjectId(project.id)}>
                       <span className="pname">{project.name}</span>
                       <span className="branch">{project.defaultBranch}</span>
+                      <span className="mark" aria-hidden="true">{projectInitials(project.name)}</span>
                     </button>
                     {projectRooms.map((room, index) => {
                       const last = index === projectRooms.length - 1;
-                      const procLabel = compactProc(processCounts[room.id]);
+                      const pc = processCounts[room.id];
+                      const procLabel = compactProc(pc);
+                      const mark = room.kind === 'main' ? room.name.charAt(0).toUpperCase() : room.name.charAt(0).toLowerCase();
                       return (
                         <button
                           key={room.id}
                           className={selectedRoom?.id === room.id ? 'node room-node row-sel' : 'node room-node'}
+                          aria-label={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
+                          title={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
+                          data-proc={pc?.running ? 'run' : pc?.lost ? 'lost' : undefined}
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
-                          <span className="conn">{last ? '└' : '├'}</span>
-                          <span className={`glyph ${room.status}`}>{STATUS_GLYPH[room.status]}</span>
+                          <span className="conn" aria-hidden="true">{last ? '└' : '├'}</span>
+                          <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>
                           <span className="rname">{room.name}</span>
                           <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
                           {procLabel && <span className="count2">{procLabel}</span>}
+                          <span className="mark" aria-hidden="true">{mark}</span>
                         </button>
                       );
                     })}
@@ -874,8 +951,8 @@ export function App() {
           ) : <div className="empty">no projects yet — hit + project</div>}
 
           <div className="addbar">
-            <button onClick={() => setShowNewRoom((value) => !value)}>+ room</button>
-            <button disabled={busy} onClick={pickProjectFolder}>+ project</button>
+            <button title="new room" onClick={() => { if (miniRail) { if (!forcedMini) expandRail(); setShowNewRoom(true); } else { setShowNewRoom((value) => !value); } }}>+ room</button>
+            <button title="add project from folder" disabled={busy} onClick={pickProjectFolder}>+ project</button>
           </div>
           {showNewRoom && (
             <div className="addform">

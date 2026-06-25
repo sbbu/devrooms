@@ -20,6 +20,8 @@
 
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
+  --rail-mini: 48px;      /* width of the collapsed icon rail */
+
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.5;
@@ -72,6 +74,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   display: grid;
   grid-template-columns: 256px minmax(0, 1fr);
   min-height: 0;
+  position: relative; /* anchors the floating hover-peek sidebar */
 }
 
 /* ── title bar ─────────────────────────────────────────────────── */
@@ -114,6 +117,16 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   padding: 6px 0 12px;
 }
 
+/* the mini-rail monogram (project/room initials) — hidden in the full sidebar */
+.mark { display: none; }
+
+/* collapse/expand toggle living at the end of the "rooms" rule */
+.rail-toggle { color: var(--dim); font-size: 13px; line-height: 1; order: 1; }
+.rail-toggle:hover:not(:disabled) { color: var(--fg); }
+.rail-toggle:disabled { color: var(--faint); cursor: not-allowed; }
+.split[data-rail="full"] .rail-toggle::before { content: "\00AB"; } /* « collapse */
+.split[data-rail="mini"] .rail-toggle::before { content: "\00BB"; } /* » expand */
+
 /* a section header drawn as a run-on rule: "rooms ──────── 3" */
 .rule {
   align-items: center;
@@ -155,11 +168,14 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .row-sel .rname,
 .row-sel .kind,
 .row-sel .count2,
+.row-sel .mark,
 .row-sel .glyph { color: var(--base); }
 
 .glyph.idle { color: var(--green); }
 .glyph.creating { color: var(--yellow); }
 .glyph.error { color: var(--red); }
+/* a selected room inverts its status glyph too (these beat the semantic colors above) */
+.row-sel .glyph.idle, .row-sel .glyph.creating, .row-sel .glyph.error { color: var(--base); }
 
 .addbar { display: flex; gap: 18px; padding: 12px 12px 4px; }
 .addform {
@@ -172,8 +188,67 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .addform .go { align-self: flex-start; color: var(--cyan); padding-top: 2px; }
 .addform .go:disabled { color: var(--faint); }
 
+/* ── mini rail (collapsed sidebar) ─────────────────────────────────
+   data-rail="mini" snaps the column to 48px (instant — one clean xterm refit).
+   Hovering or keyboard-focusing the rail floats the full 256px sidebar over the
+   workspace without reflowing it, so every label-hiding rule below is gated on
+   :not(:hover):not(:has(:focus-visible)) — peek then needs zero "restore" rules.
+   :focus-visible (not :focus-within) so a mouse click that lands focus on a rail
+   control doesn't pop the peek and make the collapse toggle look like a no-op. */
+.split[data-rail="mini"] { grid-template-columns: var(--rail-mini) minmax(0, 1fr); }
+/* pin the workspace to column 2 so it never auto-places into column 1 when the
+   peeking sidebar leaves grid flow (otherwise the terminal would reflow to 48px) */
+.split[data-rail="mini"] .ws { grid-column: 2; }
+
+.split[data-rail="mini"] .sidebar:is(:hover, :has(:focus-visible)) {
+  background: var(--base);
+  border-right: 1px solid var(--hairline);
+  bottom: 0;
+  box-shadow: inset 1px 0 0 var(--cyan); /* flat accent bar, not a drop shadow */
+  left: 0;
+  position: absolute;
+  top: 0;
+  width: 256px;
+  z-index: 20;
+}
+
+/* collapsed state: drop labels, center the glyphs, surface the monogram */
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .kind, .count2, .branch, .pname) { display: none; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .mark { display: inline; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .node { gap: 4px; justify-content: center; padding: 4px 0; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .project-node { border-top: 1px solid var(--hairline); } /* restores the grouping the ├/└ gave */
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node { position: relative; }
+
+/* the "rooms" rule collapses to just the centered » toggle */
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .rule { font-size: 0; gap: 0; justify-content: center; padding: 8px 0 5px; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .rule::after { display: none; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .rule .count { display: none; }
+
+/* the add bar stacks into two glyph buttons; the new-room form can't fit at 48px */
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar { align-items: center; flex-direction: column; gap: 6px; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button { font-size: 0; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button::before { font-size: 13px; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button:first-child::before { content: "+"; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button:last-child::before { content: "\229E"; } /* ⊞ */
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addform { display: none; }
+
+/* proc state survives as a corner dot (count text returns on peek / tooltip) */
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node[data-proc]::after { content: ""; height: 5px; position: absolute; right: 8px; top: 4px; width: 5px; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node[data-proc="run"]::after { background: var(--green); }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node[data-proc="lost"]::after { background: var(--yellow); }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node.row-sel::after { display: none; } /* don't fight the cyan fill */
+
+/* monogram colors: light by default, cyan for the active project, base on the
+   selected room's cyan block (this last one beats the .mark rule's specificity) */
+.split[data-rail="mini"] .mark { color: var(--fg); }
+.split[data-rail="mini"] .project-node.proj-active .mark { color: var(--cyan); }
+.split[data-rail="mini"] .row-sel .mark { color: var(--base); }
+
 /* ── workspace ─────────────────────────────────────────────────── */
-.ws { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+/* a query container so the diff/history/tab layouts react to the width the rail
+   actually leaves (256 / 200 / 48px), not a viewport guess. inline-size contains
+   only the inline axis, so the terminal's height chain still resolves. */
+.ws { container: ws / inline-size; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .ws-head { border-bottom: 1px solid var(--hairline); padding: 8px 12px; }
 .ws-title { align-items: baseline; display: flex; gap: 12px; margin-bottom: 7px; min-width: 0; }
 .ws-title .rname { color: var(--fg); font-size: 14px; }
@@ -355,8 +430,37 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .room-state.error strong { color: var(--red); }
 .splash .retry { color: var(--cyan); }
 
+/* ── responsive breakpoints ────────────────────────────────────────
+   @container queries on .ws drive workspace-internal reflow (keyed to the real
+   width the active rail leaves); viewport @media handles only chrome that
+   genuinely tracks the window. */
+
+/* narrow-full rail — only when the user keeps the sidebar expanded */
 @media (max-width: 920px) {
-  .split { grid-template-columns: 200px minmax(0, 1fr); }
+  .split[data-rail="full"] { grid-template-columns: 200px minmax(0, 1fr); }
+}
+
+/* stack the file/commit list above its diff when the workspace gets tight */
+@container ws (max-width: 680px) {
   .changes, .history { grid-template-columns: 1fr; }
   .chg-left, .hist-list { border-bottom: 1px solid var(--hairline); border-right: 0; max-height: 240px; }
+}
+
+/* let the tab bar and the git/launcher rows wrap instead of overflowing */
+@container ws (max-width: 520px) {
+  .tabs { flex-wrap: wrap; }
+  .cmdrow { flex-wrap: wrap; }
+  .cmdrow .branch-sel { margin-left: 0; }
+  .launcher { flex-wrap: wrap; }
+  .launcher .name { flex: 1; width: auto; }
+}
+
+/* drop the least-critical HUD segments (host:port, uptime) on a narrow window */
+@media (max-width: 640px) {
+  .statusbar .spacer ~ .seg { display: none; }
+}
+
+/* and the daemon/version chip on a very narrow window */
+@media (max-width: 460px) {
+  .titlebar .meta { display: none; }
 }
