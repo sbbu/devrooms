@@ -4,7 +4,7 @@ const bin = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const env = {
   ...process.env,
   DEVROOMS_PROJECT_PATH: process.env.DEVROOMS_PROJECT_PATH || process.cwd(),
-  DEVROOMS_PROJECT_NAME: process.env.DEVROOMS_PROJECT_NAME || 'Devrooms',
+  DEVROOMS_PROJECT_NAME: process.env.DEVROOMS_PROJECT_NAME || 'devrooms',
 };
 
 const child = spawn(bin('tsx'), ['watch', 'src/server.ts'], { env, stdio: 'inherit' });

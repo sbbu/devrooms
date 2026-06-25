@@ -1,12 +1,12 @@
-# Devrooms
+# devrooms
 
-Devrooms is a local-first cockpit for multi-agent software work.
+devrooms is a local-first cockpit for multi-agent software work.
 
 It gives each project durable room-style workspaces: full repo clones with a terminal, git status/diff controls, and attachable agent/subprocess terminals.
 
 ## Current v0
 
-Devrooms currently ships as a daemon + web UI, plus an Electron shell:
+devrooms currently ships as a daemon + web UI, plus an Electron shell:
 
 - project registry
 - room registry with a direct `main` room for a local repo and clone rooms for parallel work
@@ -15,7 +15,7 @@ Devrooms currently ships as a daemon + web UI, plus an Electron shell:
 - git branch/status/diff/stage/unstage/commit/fetch/pull/push controls
 - subagent/process launcher with presets for Hermes, Codex, Claude Code, and OpenCode
 - Electron desktop entrypoint that starts/attaches to the local daemon
-- live development scripts for coding Devrooms inside Devrooms itself
+- live development scripts for coding devrooms inside devrooms itself
 - smoke coverage for local main rooms, project creation, room cloning, git operations, process launch, and websocket terminal attachment
 
 See:
@@ -49,7 +49,7 @@ Dev mode:
 pnpm dev
 ```
 
-In dev mode the daemon gets `DEVROOMS_PROJECT_PATH=$PWD`, so Devrooms auto-registers the current git checkout as the default project and creates a `main` room that points directly at the repo instead of cloning it.
+In dev mode the daemon gets `DEVROOMS_PROJECT_PATH=$PWD`, so devrooms auto-registers the current git checkout as the default project and creates a `main` room that points directly at the repo instead of cloning it.
 
 Live desktop dev mode, with Vite HMR for the UI and `tsx watch` for the daemon:
 
@@ -57,7 +57,7 @@ Live desktop dev mode, with Vite HMR for the UI and `tsx watch` for the daemon:
 pnpm run dev:desktop
 ```
 
-This opens Electron against the Vite dev server so you can use Devrooms to work on Devrooms itself.
+This opens Electron against the Vite dev server so you can use devrooms to work on devrooms itself.
 
 Desktop shell:
 
@@ -74,7 +74,7 @@ pnpm run install:mac
 The app is copied to:
 
 ```text
-/Applications/Devrooms.app
+/Applications/devrooms.app
 ```
 
 For CI or local verification without touching `/Applications`:
@@ -89,7 +89,7 @@ The packaged app starts its own local daemon on `127.0.0.1:4317` unless `DEVROOM
 
 Use:
 
-1. Open `Devrooms.app`.
+1. Open `devrooms.app`.
 2. Create a project with either:
    - a local repo path, which creates a direct `main` room; or
    - a git repo URL/path, which can be cloned into separate rooms.
@@ -102,7 +102,7 @@ Use:
 Uninstall:
 
 ```bash
-rm -rf /Applications/Devrooms.app ~/.devrooms ~/devrooms
+rm -rf /Applications/devrooms.app ~/.devrooms ~/devrooms
 ```
 
 `~/.devrooms` stores the registry state. `~/devrooms` stores the actual room clones.

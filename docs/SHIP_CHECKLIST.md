@@ -1,6 +1,6 @@
-# Devrooms ship checklist
+# devrooms ship checklist
 
-Devrooms is daily-driver ready when a user can install it, open it like a desktop app, create/operate rooms without touching the terminal, and recover from normal failures without losing track of agent work.
+devrooms is daily-driver ready when a user can install it, open it like a desktop app, create/operate rooms without touching the terminal, and recover from normal failures without losing track of agent work.
 
 ## Must ship before daily-driver use
 
@@ -35,6 +35,6 @@ Every loop must pass:
 pnpm test
 ```
 
-Before pushing, also run whitespace, public-identity, and secrets scans from the Devrooms development runbook.
+Before pushing, also run whitespace, public-identity, and secrets scans from the devrooms development runbook.
 
 Do not call it ready until GitHub Actions is green on the final commit.

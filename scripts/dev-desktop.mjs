@@ -12,7 +12,7 @@ const baseEnv = {
   ...process.env,
   PORT: String(port),
   DEVROOMS_PROJECT_PATH: process.env.DEVROOMS_PROJECT_PATH || root,
-  DEVROOMS_PROJECT_NAME: process.env.DEVROOMS_PROJECT_NAME || 'Devrooms',
+  DEVROOMS_PROJECT_NAME: process.env.DEVROOMS_PROJECT_NAME || 'devrooms',
 };
 const children = [];
 

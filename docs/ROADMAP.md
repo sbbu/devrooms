@@ -1,6 +1,6 @@
-# Devrooms Roadmap
+# devrooms Roadmap
 
-Devrooms is aiming at a local-first cockpit for multi-agent development.
+devrooms is aiming at a local-first cockpit for multi-agent development.
 
 ## Product north star
 

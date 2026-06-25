@@ -6,8 +6,8 @@ import { spawn } from 'node:child_process';
 const repoRoot = process.cwd();
 const installDir = await mkdtemp(path.join(os.tmpdir(), 'devrooms-install-'));
 const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'devrooms-installed-runtime-'));
-const appPath = path.join(installDir, 'Devrooms.app');
-const binary = path.join(appPath, 'Contents', 'MacOS', 'Devrooms');
+const appPath = path.join(installDir, 'devrooms.app');
+const binary = path.join(appPath, 'Contents', 'MacOS', 'devrooms');
 const port = 54100 + Math.floor(Math.random() * 1000);
 
 function wait(ms) {

@@ -8,7 +8,7 @@ if (process.platform !== 'darwin') {
   process.exit(0);
 }
 
-const appBinary = path.resolve('release/mac-arm64/Devrooms.app/Contents/MacOS/Devrooms');
+const appBinary = path.resolve('release/mac-arm64/devrooms.app/Contents/MacOS/devrooms');
 const tmp = await mkdtemp(path.join(os.tmpdir(), 'devrooms-package-smoke-'));
 const port = String(54000 + (process.pid % 1000));
 const logs = [];

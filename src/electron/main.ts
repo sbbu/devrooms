@@ -46,12 +46,12 @@ async function waitForDaemon() {
     if (await isHealthy()) return;
     await sleep(100);
   }
-  throw new Error(`Devrooms daemon did not become healthy at ${serverUrl}`);
+  throw new Error(`devrooms daemon did not become healthy at ${serverUrl}`);
 }
 
 async function ensureDaemon() {
   if (await isHealthy()) return;
-  if (shouldUseExternalServer) throw new Error(`External Devrooms server is not reachable: ${serverUrl}`);
+  if (shouldUseExternalServer) throw new Error(`External devrooms server is not reachable: ${serverUrl}`);
 
   const serverEntry = path.resolve(__dirname, '../server.js');
   daemon = spawn(process.execPath, [serverEntry], {
@@ -73,7 +73,7 @@ async function createWindow() {
     height: 940,
     minWidth: 980,
     minHeight: 680,
-    title: 'Devrooms',
+    title: 'devrooms',
     backgroundColor: '#06070a',
     webPreferences: {
       contextIsolation: true,
@@ -86,15 +86,15 @@ async function createWindow() {
     void shell.openExternal(url);
     return { action: 'deny' };
   });
-  await loadStatusPage('Starting Devrooms', `<p>Starting local daemon at <code>${escapeHtml(serverUrl)}</code>…</p>`);
+  await loadStatusPage('Starting devrooms', `<p>Starting local daemon at <code>${escapeHtml(serverUrl)}</code>…</p>`);
   try {
     await ensureDaemon();
     await mainWindow.loadURL(serverUrl);
   } catch (error) {
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
     await loadStatusPage(
-      'Devrooms daemon failed to start',
-      `<p>The desktop shell is open, but the local daemon is not healthy at <code>${escapeHtml(serverUrl)}</code>.</p><pre>${escapeHtml(message)}</pre><p>Fix the daemon issue or quit and reopen Devrooms.</p>`,
+      'devrooms daemon failed to start',
+      `<p>The desktop shell is open, but the local daemon is not healthy at <code>${escapeHtml(serverUrl)}</code>.</p><pre>${escapeHtml(message)}</pre><p>Fix the daemon issue or quit and reopen devrooms.</p>`,
     );
   }
 }
