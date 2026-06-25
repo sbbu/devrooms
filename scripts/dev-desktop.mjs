@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { killStaleDaemon, killStaleVite, killStaleElectron, waitPortFree } from './lib-cleanup.mjs';
 
 const bin = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const root = process.cwd();
@@ -55,6 +56,15 @@ async function waitFor(url, label) {
 
 process.once('SIGINT', () => shutdown(0));
 process.once('SIGTERM', () => shutdown(0));
+process.once('SIGHUP', () => shutdown(0));
+
+// Kill any previous devrooms instance for this repo before starting a fresh
+// one, so daemons/vite/electron never pile up across launches.
+console.log('[devrooms] cleaning up any previous instance...');
+killStaleDaemon(root, port);
+killStaleVite();
+killStaleElectron(root);
+await waitPortFree(port);
 
 console.log('[devrooms] compiling Electron main once...');
 const tscOnce = spawnSync(bin('tsc'), ['-p', 'tsconfig.electron.json'], { cwd: root, env: baseEnv, stdio: 'inherit' });
