@@ -143,6 +143,7 @@ declare global {
   interface Window {
     __DEVROOMS_TERMINALS__?: Map<string, TerminalResource>;
     __DEVROOMS_TERMINAL_UNLOAD_BOUND__?: boolean;
+    devrooms?: { platform: string; windowControl: (action: 'minimize' | 'close' | 'fullscreen') => void };
   }
 }
 
@@ -732,7 +733,16 @@ export function App() {
   return (
     <div className="app">
       <div className="titlebar">
-        <span className="name">devrooms</span>
+        <span className="tb-left">
+          {window.devrooms && (
+            <span className="traffic">
+              <button className="tl close" title="close" onClick={() => window.devrooms?.windowControl('close')} />
+              <button className="tl min" title="minimize" onClick={() => window.devrooms?.windowControl('minimize')} />
+              <button className="tl full" title="fullscreen" onClick={() => window.devrooms?.windowControl('fullscreen')} />
+            </span>
+          )}
+          <span className="name">devrooms</span>
+        </span>
         <span className="meta">
           <span><span className={meta ? 'dot' : 'dot off'} />{meta ? 'daemon' : 'no daemon'}</span>
           {meta && <span className="ver">v{meta.version}</span>}

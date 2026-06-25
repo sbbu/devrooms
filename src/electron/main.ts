@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -17,10 +17,12 @@ function escapeHtml(value: string) {
 function statusPage(title: string, body: string) {
   const html = `<!doctype html>
 <html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>
-body{margin:0;background:#06070a;color:#eef3ff;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh}
-main{width:min(680px,calc(100vw - 48px));background:#0c1017;border:1px solid #263144;border-radius:18px;padding:24px;box-shadow:0 24px 80px #0008}
-h1{font-size:24px;margin:0 0 10px;letter-spacing:-.04em}p{color:#8f9bb2;line-height:1.5}code{background:#090d14;border:1px solid #263144;border-radius:8px;color:#94f0c4;padding:2px 5px}pre{white-space:pre-wrap;background:#090d14;border:1px solid #263144;border-radius:12px;color:#ffd1d8;padding:12px}
-</style></head><body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
+:root{color-scheme:dark}
+body{margin:0;background:#16181d;color:#c5c8d0;font:13px "JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;display:grid;place-items:center;min-height:100vh;-webkit-app-region:drag}
+main{width:min(680px,calc(100vw - 48px));background:#16181d;border:1px solid #2a2e37;padding:22px}
+h1{font-size:18px;margin:0 0 10px;font-weight:normal}p{color:#6b7079;line-height:1.5;margin:0}code{border:1px solid #2a2e37;color:#7fb4ca;padding:1px 4px}pre{white-space:pre-wrap;border:1px solid #2a2e37;color:#c97b7b;padding:12px}
+.x{position:fixed;top:8px;right:10px;width:12px;height:12px;background:#c97b7b;border:none;cursor:pointer;-webkit-app-region:no-drag}
+</style></head><body><button class="x" title="close" onclick="window.devrooms&&window.devrooms.windowControl('close')"></button><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
@@ -74,11 +76,13 @@ async function createWindow() {
     minWidth: 980,
     minHeight: 680,
     title: 'devrooms',
-    backgroundColor: '#06070a',
+    frame: false,
+    backgroundColor: '#16181d',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
@@ -98,6 +102,14 @@ async function createWindow() {
     );
   }
 }
+
+ipcMain.on('window:control', (event, action: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  if (action === 'minimize') win.minimize();
+  else if (action === 'close') win.close();
+  else if (action === 'fullscreen') win.setFullScreen(!win.isFullScreen());
+});
 
 app.whenReady().then(() => {
   void createWindow().catch((error) => {

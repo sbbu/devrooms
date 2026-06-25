@@ -84,9 +84,25 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   height: 30px;
   justify-content: space-between;
   padding: 0 12px;
+  -webkit-app-region: drag; /* whole bar drags the frameless window */
+  -webkit-user-select: none;
 }
+.titlebar button { -webkit-app-region: no-drag; }
+.tb-left { align-items: center; display: flex; gap: 12px; }
 .titlebar .name { color: var(--fg); letter-spacing: 0.04em; }
 .titlebar .meta { align-items: center; display: flex; gap: 16px; }
+
+/* custom macOS traffic-light blocks (square, TUI-style) */
+.traffic { display: flex; gap: 8px; }
+.tl { width: 12px; height: 12px; padding: 0; border: none; border-radius: 0; cursor: pointer; position: relative; }
+.tl.close { background: var(--red); }
+.tl.min { background: var(--yellow); }
+.tl.full { background: var(--green); }
+.tl::after { color: rgba(0, 0, 0, 0.6); content: ""; font-size: 9px; inset: 0; line-height: 12px; opacity: 0; position: absolute; text-align: center; }
+.traffic:hover .tl::after { opacity: 1; }
+.tl.close::after { content: "\00d7"; }
+.tl.min::after { content: "\2013"; }
+.tl.full::after { content: "+"; }
 .dot { background: var(--green); display: inline-block; height: 6px; margin-right: 6px; width: 6px; }
 .dot.off { background: var(--red); }
 .titlebar .ver { color: var(--faint); }
