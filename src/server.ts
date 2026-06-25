@@ -916,7 +916,11 @@ async function main() {
       const room = getRoom(state, req.params.roomId);
       const status = await runGit(room, ['status', '--porcelain=v1', '-b']);
       const head = await runGit(room, ['rev-parse', '--short', 'HEAD']).catch(() => ({ stdout: '' }));
-      res.json({ status: parseStatus(status.stdout), branches: await listBranches(room), head: head.stdout.trim() });
+      // Commits on HEAD not reachable from any origin ref = unpushed. Works even
+      // when the branch has no tracking upstream (where status's ahead count is 0).
+      const unpushed = await runGit(room, ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin']).catch(() => null);
+      const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
+      res.json({ status: { ...parseStatus(status.stdout), unpushedCount }, branches: await listBranches(room), head: head.stdout.trim() });
     } catch (error) {
       apiError(error, res);
     }
@@ -940,9 +944,11 @@ async function main() {
       const limit = Math.min(Math.max(Number(req.query.limit) || 80, 1), 500);
       const fmt = ['%H', '%h', '%an', '%ae', '%aI', '%s'].join('%x1f');
       const out = await runGit(room, ['log', '-n', String(limit), '--no-color', `--pretty=format:${fmt}`]).catch(() => null);
+      const unpushedOut = await runGit(room, ['rev-list', 'HEAD', '--not', '--remotes=origin']).catch(() => null);
+      const unpushedSet = new Set((unpushedOut?.stdout ?? '').split('\n').filter(Boolean));
       const commits = (out?.stdout ?? '').split('\n').filter(Boolean).map((line) => {
         const [hash, short, author, email, date, subject] = line.split('\x1f');
-        return { hash, short, author, email, date, subject };
+        return { hash, short, author, email, date, subject, unpushed: unpushedSet.has(hash) };
       });
       res.json({ commits });
     } catch (error) {

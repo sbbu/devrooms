@@ -261,6 +261,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .commit-row .cdate { margin-left: auto; white-space: nowrap; }
 .commit-row.sel .csub, .commit-row.sel .cmeta, .commit-row.sel .chash { color: var(--base); }
 .chash { font-size: 11px; }
+.commit-row .unpushed { color: var(--cyan); font-weight: 600; }
+.commit-row.sel .unpushed { color: var(--base); }
 
 .commit-detail-head { border-bottom: 1px solid var(--hairline); padding: 8px 12px; }
 .cd-subject { color: var(--fg); }

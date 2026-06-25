@@ -7,9 +7,9 @@ import './styles.css';
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean };
-type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean }; branches: string[]; head: string };
+type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number }; branches: string[]; head: string };
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
-type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string };
+type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
 type CommitDetail = Commit & { body: string; files: CommitFile[] };
 type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited' | 'lost'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
@@ -465,7 +465,7 @@ function HistoryView({ room }: { room: Room }) {
         {commits.length ? commits.map((commit) => (
           <div key={commit.hash} className={selected === commit.hash ? 'commit-row sel' : 'commit-row'} onClick={() => setSelected(commit.hash)}>
             <span className="csub">{commit.subject}</span>
-            <span className="cmeta"><span className="cauthor">{commit.author}</span><span className="cdate">{relTime(commit.date)}</span><span className="chash">{commit.short}</span></span>
+            <span className="cmeta"><span className="cauthor">{commit.author}</span><span className="cdate">{relTime(commit.date)}</span><span className="chash">{commit.short}</span>{commit.unpushed && <span className="unpushed" title="not pushed to origin">↑</span>}</span>
           </div>
         )) : <div className="empty">{error ?? 'no commits yet'}</div>}
       </div>
@@ -529,24 +529,29 @@ function GitPanel({ room }: { room: Room }) {
 
   const branch = status?.status.branch.split('...')[0] ?? room.branch ?? '';
   const changeCount = status?.status.files.length ?? 0;
-  const ahead = status?.status.ahead ?? 0;
+  const unpushed = status?.status.unpushedCount ?? 0;
   const behind = status?.status.behind ?? 0;
   const hasUpstream = status?.status.hasUpstream ?? false;
-  // GitHub Desktop's single adaptive sync action: pull when behind (incl. diverged),
-  // push when only ahead, publish when no upstream, otherwise fetch.
-  const syncVerb = !hasUpstream ? 'publish' : behind > 0 ? 'pull' : ahead > 0 ? 'push' : 'fetch';
-  const syncOp = syncVerb === 'pull' ? 'pull' : syncVerb === 'fetch' ? 'fetch' : 'push';
+  // One adaptive sync action, in git terms: pull when behind (incl. diverged),
+  // otherwise push when there are unpushed commits, otherwise fetch to check.
+  const syncVerb = behind > 0 ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
+  const syncOp = syncVerb;
+  const syncTitle = syncVerb === 'fetch'
+    ? 'git fetch --all --prune'
+    : syncVerb === 'pull'
+      ? `git pull origin ${branch}`
+      : hasUpstream ? `git push origin ${branch}` : `git push -u origin ${branch} (new branch)`;
   async function doSync() { setSyncing(true); try { await gitOp(syncOp); } finally { setSyncing(false); } }
 
   return (
     <div className="git">
       <div className="cmdrow">
-        <button className="sync" disabled={syncing} onClick={doSync} title={hasUpstream ? `${syncVerb} origin/${branch}` : 'publish branch to origin'}>
+        <button className="sync" disabled={syncing} onClick={doSync} title={syncTitle}>
           <span className="sync-verb">{syncing ? 'syncing…' : syncVerb === 'fetch' ? '⟳ fetch' : syncVerb}</span>
-          {!syncing && (behind > 0 || ahead > 0) && (
+          {!syncing && (behind > 0 || unpushed > 0) && (
             <span className="sync-counts">
               {behind > 0 && <span className="dn">↓{behind}</span>}
-              {ahead > 0 && <span className="up">↑{ahead}</span>}
+              {unpushed > 0 && <span className="up">↑{unpushed}</span>}
             </span>
           )}
         </button>
