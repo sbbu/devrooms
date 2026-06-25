@@ -164,27 +164,10 @@ function terminalTarget(roomId?: string, processId?: string) {
   return null;
 }
 
-// Chrome stays muted, but terminal CONTENT gets a vivid 16-colour palette
-// (xterm's default is the dull Tango set). Background matches the slate UI.
-const TERMINAL_THEME = {
-  background: '#16181d',
-  foreground: '#d7dae0',
-  cursor: '#7fb4ca',
-  cursorAccent: '#16181d',
-  selectionBackground: '#33415a',
-  black: '#3b4048', red: '#e06c75', green: '#98c379', yellow: '#e5c07b',
-  blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#d7dae0',
-  brightBlack: '#5c6370', brightRed: '#ff7b86', brightGreen: '#b3e88f', brightYellow: '#ffd68a',
-  brightBlue: '#80c2ff', brightMagenta: '#d8a0e8', brightCyan: '#79d0db', brightWhite: '#ffffff',
-};
-
 function getTerminalResource(key: string) {
   const cache = terminalCache();
   const existing = cache.get(key);
-  if (existing) {
-    existing.term.options.theme = TERMINAL_THEME; // re-theme already-open terminals live
-    return existing;
-  }
+  if (existing) return existing;
 
   const term = new Terminal({
     cursorBlink: true,
@@ -194,7 +177,7 @@ function getTerminalResource(key: string) {
     lineHeight: 1.18,
     macOptionIsMeta: true,
     scrollback: 10000,
-    theme: TERMINAL_THEME,
+    theme: { background: '#16181d', foreground: '#c5c8d0', cursor: '#7fb4ca', selectionBackground: '#2a3340' },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
