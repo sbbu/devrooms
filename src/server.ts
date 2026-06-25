@@ -702,6 +702,7 @@ function devroomEnv(room: Room) {
     ...process.env,
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
+    FORCE_COLOR: '3', // force truecolor for agents (chalk/supports-color) regardless of detection
     TERM_PROGRAM: 'devrooms',
     DEVROOMS_ROOM_ID: room.id,
     DEVROOMS_ROOM_NAME: room.name,
