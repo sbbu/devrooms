@@ -226,7 +226,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .ck:disabled { cursor: not-allowed; opacity: 0.4; }
 
 /* changes view */
-.changes { display: grid; flex: 1; grid-template-columns: minmax(230px, 320px) 1fr; min-height: 0; }
+.changes { display: grid; flex: 1; grid-template-columns: minmax(230px, 320px) minmax(0, 1fr); min-height: 0; min-width: 0; }
 .chg-left { border-right: 1px solid var(--hairline); display: flex; flex-direction: column; min-height: 0; }
 .chg-listhead { align-items: center; border-bottom: 1px solid var(--hairline); color: var(--dim); display: flex; font-size: 12px; gap: 9px; padding: 6px 12px; }
 .chg-list { flex: 1; overflow: auto; padding: 3px 0; }
@@ -253,10 +253,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .diff-pane { flex: 1; min-width: 0; overflow: auto; }
 .diff-head { background: var(--base); border-bottom: 1px solid var(--hairline); color: var(--fg); padding: 5px 12px; position: sticky; top: 0; z-index: 1; }
 .diff-head .fp { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diff-table { min-width: 100%; width: max-content; }
+.diff-table { min-width: 100%; width: 100%; }
 .dl { display: flex; }
 .dl .ln { border-right: 1px solid var(--hairline); color: var(--faint); flex: none; font-size: 12px; padding: 0 6px; text-align: right; user-select: none; width: 44px; }
-.dl .dc { color: var(--fg); flex: 1; font-size: 12px; padding: 0 10px; white-space: pre; }
+.dl .dc { color: var(--fg); flex: 1; font-size: 12px; min-width: 0; overflow-wrap: anywhere; padding: 0 10px; white-space: pre-wrap; }
 .dl.add { background: rgba(138, 168, 114, 0.10); }
 .dl.add .dc { color: var(--green); }
 .dl.del { background: rgba(201, 123, 123, 0.10); }
@@ -266,7 +266,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .dl.meta .dc { color: var(--dim); }
 
 /* history view */
-.history { display: grid; flex: 1; grid-template-columns: minmax(240px, 360px) 1fr; min-height: 0; }
+.history { display: grid; flex: 1; grid-template-columns: minmax(240px, 360px) minmax(0, 1fr); min-height: 0; min-width: 0; }
 .hist-list { border-right: 1px solid var(--hairline); overflow: auto; padding: 3px 0; }
 .commit-row { align-items: center; cursor: pointer; display: flex; gap: 9px; padding: 5px 12px; }
 .commit-row:hover { background: var(--surface); }
