@@ -1,0 +1,163 @@
+// Standalone PTY host.
+//
+// Owns every terminal/agent PTY in its own long-lived process so they survive
+// API-daemon restarts. In dev the daemon runs under `tsx watch`, which SIGTERMs
+// and respawns the daemon on every server-code edit; if the PTYs lived there
+// they'd die with it. Here the daemon only sends lifecycle commands over HTTP,
+// and terminal I/O streams over this host's own WebSocket, so a daemon restart
+// never drops a live terminal.
+import http from 'node:http';
+import { WebSocket, WebSocketServer } from 'ws';
+import pty from '@homebridge/node-pty-prebuilt-multiarch';
+
+const PORT = Number(process.env.DEVROOMS_PTY_PORT || 4318);
+const HOST = '127.0.0.1';
+
+type Session = {
+  key: string;
+  pty: pty.IPty;
+  log: string[];
+  status: 'running' | 'exited';
+  exitCode?: number;
+  exitedAt?: string;
+  cols: number;
+  rows: number;
+};
+
+// key: "room:<roomId>" | "proc:<processId>"
+const sessions = new Map<string, Session>();
+
+function appendLog(log: string[], data: string) {
+  log.push(data);
+  if (log.length > 5000) log.splice(0, log.length - 5000);
+}
+
+function logTail(log: string[], maxChars = 4000) {
+  return log.join('').slice(-maxChars);
+}
+
+function spawnSession(key: string, args: string[], opts: { cwd: string; env: Record<string, string>; cols?: number; rows?: number }) {
+  const existing = sessions.get(key);
+  if (existing && existing.status === 'running') return existing;
+  if (existing) sessions.delete(key);
+  const cols = opts.cols ?? 120;
+  const rows = opts.rows ?? 36;
+  const shell = opts.env.SHELL || process.env.SHELL || '/bin/zsh';
+  const child = pty.spawn(shell, args, { name: 'xterm-256color', cols, rows, cwd: opts.cwd, env: opts.env });
+  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows };
+  child.onData((data) => appendLog(session.log, data));
+  child.onExit(({ exitCode }) => {
+    session.status = 'exited';
+    session.exitCode = exitCode;
+    session.exitedAt = new Date().toISOString();
+    appendLog(session.log, `\r\n[devrooms session exited: ${exitCode}]\r\n`);
+  });
+  sessions.set(key, session);
+  return session;
+}
+
+function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    let data = '';
+    req.on('data', (chunk) => { data += chunk; });
+    req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); } });
+    req.on('error', () => resolve({}));
+  });
+}
+
+function sendJson(res: http.ServerResponse, code: number, body: unknown) {
+  res.writeHead(code, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  const path = url.pathname;
+  try {
+    if (req.method === 'GET' && path === '/health') {
+      const running = [...sessions.values()].filter((s) => s.status === 'running').map((s) => s.key);
+      return sendJson(res, 200, { ok: true, pid: process.pid, running });
+    }
+    if (req.method === 'POST' && path === '/spawn') {
+      const body = await readBody(req);
+      const key = typeof body.key === 'string' ? body.key : '';
+      const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+      const env = (body.env && typeof body.env === 'object') ? body.env as Record<string, string> : null;
+      if (!key || !cwd || !env) return sendJson(res, 400, { error: 'key, cwd and env are required' });
+      const args = body.kind === 'process' ? ['-lc', String(body.command ?? '')] : [];
+      const session = spawnSession(key, args, { cwd, env, cols: Number(body.cols) || undefined, rows: Number(body.rows) || undefined });
+      return sendJson(res, 200, { ok: true, status: session.status });
+    }
+    if (req.method === 'POST' && path === '/kill') {
+      const body = await readBody(req);
+      const key = typeof body.key === 'string' ? body.key : '';
+      const session = key ? sessions.get(key) : undefined;
+      if (session) { if (session.status === 'running') session.pty.kill(); sessions.delete(key); }
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && path === '/session') {
+      const key = url.searchParams.get('key') ?? '';
+      const session = sessions.get(key);
+      if (!session) return sendJson(res, 404, { error: 'no session' });
+      const max = Number(url.searchParams.get('max') || 4000);
+      return sendJson(res, 200, { status: session.status, exitCode: session.exitCode, exitedAt: session.exitedAt, logTail: logTail(session.log, max) });
+    }
+    return sendJson(res, 404, { error: 'not found' });
+  } catch (error) {
+    return sendJson(res, 500, { error: String(error) });
+  }
+});
+
+const wss = new WebSocketServer({ noServer: true });
+
+function wire(ws: WebSocket, session: Session, replay: string) {
+  if (replay) ws.send(JSON.stringify({ type: 'output', data: replay }));
+  const disposable = session.pty.onData((data) => {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'output', data }));
+  });
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number };
+      if (msg.type === 'input' && typeof msg.data === 'string' && session.status === 'running') session.pty.write(msg.data);
+      if (msg.type === 'resize' && msg.cols && msg.rows && session.status === 'running') {
+        session.pty.resize(msg.cols, msg.rows);
+        session.cols = msg.cols;
+        session.rows = msg.rows;
+      }
+    } catch {
+      /* ignore malformed frames */
+    }
+  });
+  ws.on('close', () => disposable.dispose());
+}
+
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  const room = url.pathname.match(/^\/ws\/rooms\/([^/]+)\/terminal$/);
+  const proc = url.pathname.match(/^\/ws\/processes\/([^/]+)$/);
+  const key = room ? `room:${room[1]}` : proc ? `proc:${proc[1]}` : null;
+  if (!key) { socket.destroy(); return; }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    const session = sessions.get(key);
+    const wantsReplay = url.searchParams.get('replay') !== '0';
+    if (!session) {
+      ws.send(JSON.stringify({ type: 'output', data: '\r\n[devrooms: no live session — reopen it]\r\n' }));
+      ws.close();
+      return;
+    }
+    wire(ws, session, wantsReplay ? logTail(session.log, 200_000) : '');
+  });
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`devrooms pty-host on http://${HOST}:${PORT} pid=${process.pid}`);
+});
+
+const shutdown = () => {
+  // Note: we deliberately do NOT kill sessions here — the whole point is that
+  // PTYs outlive restarts. The OS reaps them only when this host itself exits.
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 500).unref();
+};
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

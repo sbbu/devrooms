@@ -11,6 +11,6 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src/server.ts", "src/types/**/*.d.ts"],
+  "include": ["src/server.ts", "src/pty-host.ts", "src/types/**/*.d.ts"],
   "exclude": ["src/client"]
 }
