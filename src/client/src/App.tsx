@@ -468,12 +468,32 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
     finally { setCommitting(false); }
   }
 
+  async function discardFile(path: string) {
+    if (!window.confirm(`Discard changes to ${path}? This can't be undone.`)) return;
+    setError(null);
+    try {
+      await api(`/api/rooms/${room.id}/git/discard`, { method: 'POST', body: JSON.stringify({ path }) });
+      await onCommitted();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
+  async function discardAll() {
+    if (!files.length) return;
+    if (!window.confirm(`Discard all ${files.length} uncommitted change${files.length === 1 ? '' : 's'}? This can't be undone.`)) return;
+    setError(null);
+    try {
+      await api(`/api/rooms/${room.id}/git/discard-all`, { method: 'POST', body: JSON.stringify({}) });
+      await onCommitted();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
   return (
     <div className="changes">
       <div className="chg-left">
         <div className="chg-listhead">
           <input ref={masterRef} type="checkbox" className="ck" checked={allIncluded} onChange={toggleAll} disabled={!files.length} />
           <span>{files.length} changed file{files.length === 1 ? '' : 's'}</span>
+          {files.length > 0 && <button className="discard-all" title="discard all uncommitted changes" onClick={discardAll}>discard all</button>}
         </div>
         <div className="chg-list">
           {files.length ? files.map((file) => {
@@ -483,6 +503,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
                 <input type="checkbox" className="ck" checked={!excluded.has(file.path)} onChange={() => toggle(file.path)} onClick={(event) => event.stopPropagation()} />
                 <span className={`g ${gutter.cls}`}>{gutter.ch}</span>
                 <span className="p">{file.path}</span>
+                <button className="discard-file" title="discard changes" onClick={(event) => { event.stopPropagation(); discardFile(file.path); }}>discard</button>
               </div>
             );
           }) : <div className="empty clean">no local changes</div>}

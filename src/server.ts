@@ -1227,6 +1227,23 @@ async function main() {
           await runGit(room, ['add', '--', ...paths]);
         }
         result = await runGit(room, ['commit', '-m', message]);
+      } else if (op === 'discard') {
+        // Throw away uncommitted changes to one path (destructive; client confirms).
+        const file = requireString(req.body?.path, 'path');
+        await assertPathInside(room.path, path.join(room.path, file));
+        const tracked = (await run('git', ['cat-file', '-e', `HEAD:${file}`], room.path)).exitCode === 0;
+        if (tracked) {
+          // Modified/staged/deleted -> restore index + worktree to the committed version.
+          result = await runGit(room, ['checkout', 'HEAD', '--', file]);
+        } else {
+          // New file (staged or untracked) -> unstage if needed, then remove it.
+          await run('git', ['rm', '-f', '--ignore-unmatch', '--', file], room.path);
+          result = await runGit(room, ['clean', '-fd', '--', file]);
+        }
+      } else if (op === 'discard-all') {
+        // Revert all tracked changes and remove every untracked file (destructive).
+        await run('git', ['reset', '--hard', 'HEAD'], room.path); // best-effort: errors only in a commit-less repo
+        result = await runGit(room, ['clean', '-fd']);
       } else {
         throw new HttpError(404, `unknown git operation: ${op}`);
       }
