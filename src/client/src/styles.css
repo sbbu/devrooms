@@ -252,17 +252,18 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* history view */
 .history { display: grid; flex: 1; grid-template-columns: minmax(240px, 360px) 1fr; min-height: 0; }
 .hist-list { border-right: 1px solid var(--hairline); overflow: auto; padding: 3px 0; }
-.commit-row { cursor: pointer; display: flex; flex-direction: column; gap: 2px; padding: 5px 12px; }
+.commit-row { align-items: center; cursor: pointer; display: flex; gap: 9px; padding: 5px 12px; }
 .commit-row:hover { background: var(--surface); }
 .commit-row.sel { background: var(--cyan); }
+.commit-row.up { box-shadow: inset 3px 0 0 var(--cyan); }
+.cgutter { color: var(--cyan); flex: none; font-size: 15px; font-weight: 700; line-height: 1; text-align: center; width: 13px; }
+.cbody { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .commit-row .csub { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-row .cmeta { color: var(--dim); display: flex; font-size: 11px; gap: 8px; }
 .commit-row .cauthor { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-row .cdate { margin-left: auto; white-space: nowrap; }
-.commit-row.sel .csub, .commit-row.sel .cmeta, .commit-row.sel .chash { color: var(--base); }
+.commit-row.sel .csub, .commit-row.sel .cmeta, .commit-row.sel .chash, .commit-row.sel .cgutter { color: var(--base); }
 .chash { font-size: 11px; }
-.commit-row .unpushed { color: var(--cyan); font-weight: 600; }
-.commit-row.sel .unpushed { color: var(--base); }
 
 .commit-detail-head { border-bottom: 1px solid var(--hairline); padding: 8px 12px; }
 .cd-subject { color: var(--fg); }

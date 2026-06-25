@@ -463,9 +463,12 @@ function HistoryView({ room }: { room: Room }) {
     <div className="history">
       <div className="hist-list">
         {commits.length ? commits.map((commit) => (
-          <div key={commit.hash} className={selected === commit.hash ? 'commit-row sel' : 'commit-row'} onClick={() => setSelected(commit.hash)}>
-            <span className="csub">{commit.subject}</span>
-            <span className="cmeta"><span className="cauthor">{commit.author}</span><span className="cdate">{relTime(commit.date)}</span><span className="chash">{commit.short}</span>{commit.unpushed && <span className="unpushed" title="not pushed to origin">↑</span>}</span>
+          <div key={commit.hash} className={`commit-row${selected === commit.hash ? ' sel' : ''}${commit.unpushed ? ' up' : ''}`} onClick={() => setSelected(commit.hash)}>
+            <span className="cgutter" title={commit.unpushed ? 'not pushed to origin' : undefined}>{commit.unpushed ? '↑' : ''}</span>
+            <span className="cbody">
+              <span className="csub">{commit.subject}</span>
+              <span className="cmeta"><span className="cauthor">{commit.author}</span><span className="cdate">{relTime(commit.date)}</span><span className="chash">{commit.short}</span></span>
+            </span>
           </div>
         )) : <div className="empty">{error ?? 'no commits yet'}</div>}
       </div>
