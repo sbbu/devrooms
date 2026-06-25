@@ -508,7 +508,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
   );
 }
 
-function HistoryView({ room }: { room: Room }) {
+function HistoryView({ room, reloadKey }: { room: Room; reloadKey: number }) {
   const [commits, setCommits] = useState<Commit[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<CommitDetail | null>(null);
@@ -522,7 +522,9 @@ function HistoryView({ room }: { room: Room }) {
       .then((data) => { if (!alive) return; setCommits(data.commits); setSelected((current) => current ?? data.commits[0]?.hash ?? null); })
       .catch((err) => { if (alive) setError(err instanceof Error ? err.message : String(err)); });
     return () => { alive = false; };
-  }, [room.id]);
+    // reloadKey bumps after every git op (push/pull/fetch/checkout) so the
+    // unpushed (↑) markers refresh once a push lands.
+  }, [room.id, reloadKey]);
 
   useEffect(() => {
     if (!selected) { setDetail(null); setFile(null); return; }
@@ -607,6 +609,7 @@ function GitPanel({ room }: { room: Room }) {
   const [note, setNote] = useState('');
   const [newBranch, setNewBranch] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   async function refresh() {
     try { setStatus(await api<GitStatus>(`/api/rooms/${room.id}/git/status`)); setError(null); }
@@ -626,6 +629,7 @@ function GitPanel({ room }: { room: Room }) {
       const result = await api<{ stdout: string; stderr: string }>(`/api/rooms/${room.id}/git/${op}`, { method: 'POST', body: JSON.stringify(body ?? {}) });
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
       await refresh();
+      setReloadKey((value) => value + 1); // re-fetch history so ↑ markers update
       return true;
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); return false; }
   }
@@ -674,7 +678,7 @@ function GitPanel({ room }: { room: Room }) {
       {error && <div className="error">{error}</div>}
       {view === 'changes'
         ? <ChangesView room={room} status={status} branch={branch} onCommitted={refresh} />
-        : <HistoryView room={room} />}
+        : <HistoryView room={room} reloadKey={reloadKey} />}
       {note && <div className="gitnote" onClick={() => setNote('')}>{note}</div>}
     </div>
   );
