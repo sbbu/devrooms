@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { killStaleDaemon, killByPort, waitPortFree } from './lib-cleanup.mjs';
+import { killStaleDaemon, waitPortFree } from './lib-cleanup.mjs';
 
 const bin = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const root = process.cwd();
@@ -15,9 +15,9 @@ delete env.DEVROOMS_PROJECT_NAME;
 // Kill any previous daemon for this repo so daemons never pile up. Only the
 // daemon here (not vite) — `pnpm dev` runs vite concurrently as a sibling.
 killStaleDaemon(root, port);
-killByPort(port + 1); // stale pty-host
+// The pty-host (port + 1) is left running so sessions survive restarts; the
+// daemon reuses a healthy one. `pnpm stop` ends it on purpose.
 await waitPortFree(port);
-await waitPortFree(port + 1);
 
 const child = spawn(bin('tsx'), ['watch', 'src/server.ts'], { env, stdio: 'inherit' });
 
