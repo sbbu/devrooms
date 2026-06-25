@@ -878,6 +878,24 @@ async function ptyHostRunningKeys(): Promise<Set<string>> {
   }
 }
 
+type HostActivity = { status: string; lastOutputMs: number; attentionMs: number; agentState?: string; agentStateMs: number };
+
+async function ptyHostActivity(): Promise<{ now: number; sessions: Record<string, HostActivity> }> {
+  try {
+    const res = await fetch(`${PTY_HOST_URL}/activity`);
+    if (!res.ok) return { now: Date.now(), sessions: {} };
+    return (await res.json()) as { now: number; sessions: Record<string, HostActivity> };
+  } catch {
+    return { now: Date.now(), sessions: {} };
+  }
+}
+
+// Host keys are `room:<roomId>` / `room:<roomId>:<terminalId>` / `proc:<id>`.
+function roomIdFromKey(key: string): string | null {
+  const match = key.match(/^room:([^:]+)(?::.+)?$/);
+  return match ? match[1] : null;
+}
+
 async function ptyHostSpawn(key: string, opts: { kind?: 'process'; command?: string; cwd: string; env: NodeJS.ProcessEnv }) {
   await ensurePtyHost();
   await fetch(`${PTY_HOST_URL}/spawn`, {
@@ -949,6 +967,31 @@ async function main() {
 
   app.get('/api/presets', async (_req, res) => {
     res.json({ presets: agentPresets() });
+  });
+
+  // Per-room agent activity for the sidebar attention indicator. Aggregates every
+  // terminal in a room: the room is as "busy" as its most-recent output and
+  // surfaces the newest explicit/notification signal across its tiles.
+  app.get('/api/activity', async (_req, res) => {
+    try {
+      const data = await ptyHostActivity();
+      const rooms: Record<string, { lastOutputMs: number; attentionMs: number; agentState?: string; agentStateMs: number }> = {};
+      for (const [key, session] of Object.entries(data.sessions)) {
+        const roomId = roomIdFromKey(key);
+        if (!roomId) continue;
+        const current = rooms[roomId] ?? { lastOutputMs: 0, attentionMs: 0, agentState: undefined, agentStateMs: 0 };
+        current.lastOutputMs = Math.max(current.lastOutputMs, session.lastOutputMs ?? 0);
+        current.attentionMs = Math.max(current.attentionMs, session.attentionMs ?? 0);
+        if ((session.agentStateMs ?? 0) > current.agentStateMs) {
+          current.agentState = session.agentState;
+          current.agentStateMs = session.agentStateMs ?? 0;
+        }
+        rooms[roomId] = current;
+      }
+      res.json({ now: data.now, rooms });
+    } catch (error) {
+      apiError(error, res);
+    }
   });
 
   app.get('/api/projects', async (_req, res) => {

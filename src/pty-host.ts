@@ -16,6 +16,8 @@ const portFlag = process.argv.indexOf('--port');
 const PORT = portFlag >= 0 ? Number(process.argv[portFlag + 1]) : 4318;
 const HOST = '127.0.0.1';
 
+type AgentState = 'working' | 'needs-input' | 'done';
+
 type Session = {
   key: string;
   pty: pty.IPty;
@@ -25,6 +27,12 @@ type Session = {
   exitedAt?: string;
   cols: number;
   rows: number;
+  // Activity tracking for the sidebar "needs attention vs thinking" indicator.
+  lastOutputMs: number;        // wall-clock of the most recent output byte
+  attentionMs: number;         // last generic notification (OSC 9 / OSC 777)
+  agentState?: AgentState;     // last explicit state from an agent hook (private OSC)
+  agentStateMs: number;        // wall-clock of that explicit state
+  scanCarry: string;           // tail of the last chunk, so markers split across chunks still match
 };
 
 // key: "room:<roomId>" | "proc:<processId>"
@@ -33,6 +41,26 @@ const sessions = new Map<string, Session>();
 function appendLog(log: string[], data: string) {
   log.push(data);
   if (log.length > 5000) log.splice(0, log.length - 5000);
+}
+
+// Derive activity from the raw output stream. Agents announce state three ways:
+//  - private OSC 9279;<state> emitted by the hooks devrooms installs (precise)
+//  - generic desktop-notification escapes OSC 9 / OSC 777 (e.g. codex osc9 mode)
+//  - simply producing output (=> thinking). Raw BEL is ignored: shells ring it on
+//    every failed tab-completion, so it is far too noisy to mean "attention".
+const STATE_RE = /\x1b\]9279;(working|needs-input|done)(?:\x07|\x1b\\)/g;
+const NOTIFY_RE = /\x1b\]9;[^\x07\x1b]|\x1b\]777;/;
+
+function scanActivity(session: Session, data: string) {
+  session.lastOutputMs = Date.now();
+  const buf = session.scanCarry + data;
+  let match: RegExpExecArray | null;
+  let lastState: AgentState | undefined;
+  STATE_RE.lastIndex = 0;
+  while ((match = STATE_RE.exec(buf))) lastState = match[1] as AgentState;
+  if (lastState) { session.agentState = lastState; session.agentStateMs = Date.now(); }
+  if (NOTIFY_RE.test(buf)) session.attentionMs = Date.now();
+  session.scanCarry = data.slice(-48);
 }
 
 function logTail(log: string[], maxChars = 4000) {
@@ -47,8 +75,8 @@ function spawnSession(key: string, args: string[], opts: { cwd: string; env: Rec
   const rows = opts.rows ?? 36;
   const shell = opts.env.SHELL || process.env.SHELL || '/bin/zsh';
   const child = pty.spawn(shell, args, { name: 'xterm-256color', cols, rows, cwd: opts.cwd, env: opts.env });
-  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows };
-  child.onData((data) => appendLog(session.log, data));
+  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows, lastOutputMs: Date.now(), attentionMs: 0, agentStateMs: 0, scanCarry: '' };
+  child.onData((data) => { appendLog(session.log, data); scanActivity(session, data); });
   child.onExit(({ exitCode }) => {
     session.status = 'exited';
     session.exitCode = exitCode;
@@ -80,6 +108,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/health') {
       const running = [...sessions.values()].filter((s) => s.status === 'running').map((s) => s.key);
       return sendJson(res, 200, { ok: true, pid: process.pid, running });
+    }
+    if (req.method === 'GET' && path === '/activity') {
+      const out: Record<string, { status: string; lastOutputMs: number; attentionMs: number; agentState?: AgentState; agentStateMs: number }> = {};
+      for (const [key, s] of sessions) {
+        out[key] = { status: s.status, lastOutputMs: s.lastOutputMs, attentionMs: s.attentionMs, agentState: s.agentState, agentStateMs: s.agentStateMs };
+      }
+      return sendJson(res, 200, { now: Date.now(), sessions: out });
     }
     if (req.method === 'POST' && path === '/spawn') {
       const body = await readBody(req);

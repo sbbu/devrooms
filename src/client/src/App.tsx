@@ -370,6 +370,38 @@ function RoomTerminals({ room, onClose }: { room: Room; onClose: (terminalId: st
   );
 }
 
+// Per-room agent state derived from the host's activity stream.
+type RoomActivity = { lastOutputMs: number; attentionMs: number; agentState?: string; agentStateMs: number };
+type RoomState = 'thinking' | 'needs-input' | 'attention' | 'idle';
+const BUSY_MS = 1000;
+const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function deriveRoomState(activity: RoomActivity | undefined, ackMs: number): RoomState {
+  if (!activity) return 'idle';
+  const now = Date.now(); // same machine as the host, so its ms timestamps are comparable
+  // An explicit hook signal wins when it's the last thing that happened.
+  const explicit = activity.agentState && activity.agentStateMs >= activity.lastOutputMs - 150;
+  if (explicit && activity.agentState === 'working') return 'thinking';
+  if (now - activity.lastOutputMs < BUSY_MS) return 'thinking';
+  if (explicit && activity.agentStateMs > ackMs && activity.agentState === 'needs-input') return 'needs-input';
+  if (explicit && activity.agentStateMs > ackMs && activity.agentState === 'done') return 'attention';
+  if (activity.attentionMs > ackMs && activity.attentionMs >= activity.lastOutputMs - 150) return 'attention';
+  return 'idle';
+}
+
+function AgentGlyph({ state }: { state: RoomState }) {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    if (state !== 'thinking') return;
+    const id = window.setInterval(() => setFrame((value) => (value + 1) % SPIN.length), 90);
+    return () => window.clearInterval(id);
+  }, [state]);
+  if (state === 'thinking') return <span className="glyph thinking" title="thinking">{SPIN[frame]}</span>;
+  if (state === 'needs-input') return <span className="glyph needs-input" title="waiting for your input">◆</span>;
+  if (state === 'attention') return <span className="glyph attention" title="finished — your turn">◆</span>;
+  return <span className="glyph idle">●</span>;
+}
+
 function ChangesView({ room, status, branch, onCommitted }: { room: Room; status: GitStatus | null; branch: string; onCommitted: () => Promise<void> | void }) {
   const files = status?.status.files ?? [];
   const [selected, setSelected] = useState<string | null>(null);
@@ -719,6 +751,9 @@ export function App() {
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<Record<string, RoomActivity>>({});
+  // When a room was last "seen" — attention older than this is acknowledged.
+  const ackRef = useRef<Record<string, number>>({});
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
   const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId), [rooms, selectedRoomId]);
@@ -740,6 +775,25 @@ export function App() {
     const timer = setInterval(() => refresh().catch(() => undefined), 5000);
     return () => clearInterval(timer);
   }, [selectedProjectId, selectedRoomId]);
+
+  // Poll per-room agent activity for the sidebar attention indicator, and keep the
+  // focused room acknowledged so it never flags attention while you're watching it.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const data = await api<{ now: number; rooms: Record<string, RoomActivity> }>('/api/activity');
+        if (!alive) return;
+        if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now();
+        setActivity(data.rooms);
+      } catch { /* host may be momentarily unreachable */ }
+    };
+    poll();
+    const timer = setInterval(poll, 1200);
+    return () => { alive = false; clearInterval(timer); };
+  }, [selectedRoomId]);
+
+  useEffect(() => { if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now(); }, [selectedRoomId]);
 
   async function refreshRoomProcesses(roomId: string) {
     const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
@@ -860,7 +914,9 @@ export function App() {
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
                           <span className="conn">{last ? '└' : '├'}</span>
-                          <span className={`glyph ${room.status}`}>{STATUS_GLYPH[room.status]}</span>
+                          {room.status === 'idle'
+                            ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
+                            : <span className={`glyph ${room.status}`}>{STATUS_GLYPH[room.status]}</span>}
                           <span className="rname">{room.name}</span>
                           <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
                           {procLabel && <span className="count2">{procLabel}</span>}

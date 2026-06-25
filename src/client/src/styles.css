@@ -160,6 +160,12 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .glyph.idle { color: var(--green); }
 .glyph.creating { color: var(--yellow); }
 .glyph.error { color: var(--red); }
+/* agent activity: thinking = working (cyan spinner), attention = your turn,
+   needs-input = blocked on you (yellow, the most urgent) */
+.glyph.thinking { color: var(--cyan); }
+.glyph.attention { color: var(--cyan); }
+.glyph.needs-input { color: var(--yellow); }
+.row-sel .glyph.thinking, .row-sel .glyph.attention, .row-sel .glyph.needs-input { color: var(--base); }
 
 .addbar { display: flex; gap: 18px; padding: 12px 12px 4px; }
 .addform {
