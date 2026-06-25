@@ -1,0 +1,842 @@
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
+import './styles.css';
+
+type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
+type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string };
+type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean };
+type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean }; branches: string[]; head: string };
+type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
+type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string };
+type CommitFile = { status: string; path: string };
+type CommitDetail = Commit & { body: string; files: CommitFile[] };
+type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited' | 'lost'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
+type AgentPreset = { id: string; label: string; description: string; command: string; available: boolean };
+type Meta = { name: string; version: string; startedAt: string; uptimeSeconds: number; pid: number; platform: string; node: string; bindHost: string; port: number; home: string; roomsRoot: string; projectCount: number; roomCount: number; processCount: number; runningProcessCount: number };
+type ProcessCount = { lost: number; running: number; total: number };
+type ProcessCounts = Record<string, ProcessCount>;
+
+type Tab = 'terminal' | 'git' | 'subagents';
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+  return data as T;
+}
+
+function wsUrl(path: string) {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}${path}`;
+}
+
+function shortPath(value: string) {
+  return value.replace(/^\/Users\/[^/]+/, '~');
+}
+
+function formatUptime(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 1) return `${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 1) return `${minutes}m`;
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function compactProc(count?: ProcessCount) {
+  if (!count?.total) return '';
+  if (count.running) return `${count.running} run`;
+  if (count.lost) return `${count.lost} lost`;
+  return `${count.total} done`;
+}
+
+const STATUS_GLYPH: Record<Room['status'], string> = { idle: '●', creating: '◐', error: '✕' };
+
+function fileGutter(file: GitFile): { ch: string; cls: string } {
+  if (file.raw.startsWith('??')) return { ch: '?', cls: 'new' };
+  if (file.index.trim() && file.workingTree.trim()) return { ch: '±', cls: 'mixed' };
+  if (file.index.trim()) return { ch: 'S', cls: 'staged' };
+  if (file.workingTree.trim()) return { ch: 'M', cls: 'modified' };
+  return { ch: '•', cls: 'modified' };
+}
+
+function relTime(iso: string) {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return iso;
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.round(months / 12)}y ago`;
+}
+
+const COMMIT_STATUS_CLASS: Record<string, string> = { A: 'new', M: 'modified', D: 'del', R: 'staged', C: 'staged' };
+
+type DiffRow = { type: 'hunk' | 'meta' | 'add' | 'del' | 'ctx'; text: string; oldNo?: number; newNo?: number };
+
+function parseDiff(text: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let oldNo = 0;
+  let newNo = 0;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('@@')) {
+      const match = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (match) { oldNo = Number(match[1]); newNo = Number(match[2]); }
+      rows.push({ type: 'hunk', text: line });
+    } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('+++') || line.startsWith('---') || line.startsWith('new file') || line.startsWith('deleted file') || line.startsWith('old mode') || line.startsWith('new mode') || line.startsWith('similarity') || line.startsWith('rename ') || line.startsWith('\\')) {
+      rows.push({ type: 'meta', text: line });
+    } else if (line.startsWith('+')) {
+      rows.push({ type: 'add', text: line, newNo });
+      newNo++;
+    } else if (line.startsWith('-')) {
+      rows.push({ type: 'del', text: line, oldNo });
+      oldNo++;
+    } else {
+      rows.push({ type: 'ctx', text: line, oldNo, newNo });
+      oldNo++;
+      newNo++;
+    }
+  }
+  if (rows.length && rows[rows.length - 1].type === 'ctx' && rows[rows.length - 1].text === '') rows.pop();
+  return rows;
+}
+
+function DiffView({ text }: { text: string }) {
+  if (!text.trim()) return <div className="empty">no textual changes</div>;
+  const rows = parseDiff(text);
+  return (
+    <div className="diff-table">
+      {rows.map((row, i) => (
+        <div key={i} className={`dl ${row.type}`}>
+          <span className="ln">{row.oldNo ?? ''}</span>
+          <span className="ln">{row.newNo ?? ''}</span>
+          <span className="dc">{row.text === '' ? ' ' : row.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type TerminalResource = {
+  key: string;
+  container: HTMLDivElement;
+  term: Terminal;
+  fit: FitAddon;
+  opened: boolean;
+  hasOutput: boolean;
+  endpoint?: string;
+  wantEndpoint?: string;
+  socket?: WebSocket;
+  input?: { dispose(): void };
+  reconnectTimer?: number;
+  retries?: number;
+};
+
+declare global {
+  interface Window {
+    __DEVROOMS_TERMINALS__?: Map<string, TerminalResource>;
+    __DEVROOMS_TERMINAL_UNLOAD_BOUND__?: boolean;
+  }
+}
+
+function terminalCache() {
+  window.__DEVROOMS_TERMINALS__ ??= new Map<string, TerminalResource>();
+  if (!window.__DEVROOMS_TERMINAL_UNLOAD_BOUND__) {
+    window.addEventListener('beforeunload', () => {
+      for (const resource of window.__DEVROOMS_TERMINALS__?.values() ?? []) resource.socket?.close();
+    });
+    window.__DEVROOMS_TERMINAL_UNLOAD_BOUND__ = true;
+  }
+  return window.__DEVROOMS_TERMINALS__;
+}
+
+function terminalTarget(roomId?: string, processId?: string) {
+  if (processId) return { key: `process:${processId}`, endpoint: `/ws/processes/${processId}` };
+  if (roomId) return { key: `room:${roomId}`, endpoint: `/ws/rooms/${roomId}/terminal` };
+  return null;
+}
+
+function getTerminalResource(key: string) {
+  const cache = terminalCache();
+  const existing = cache.get(key);
+  if (existing) return existing;
+
+  const term = new Terminal({
+    cursorBlink: true,
+    convertEol: false,
+    fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, ui-monospace, monospace',
+    fontSize: 13,
+    lineHeight: 1.18,
+    macOptionIsMeta: true,
+    scrollback: 10000,
+    theme: { background: '#16181d', foreground: '#c5c8d0', cursor: '#7fb4ca', selectionBackground: '#2a3340' },
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  const container = document.createElement('div');
+  container.className = 'terminal-surface';
+  const resource: TerminalResource = { key, container, term, fit, opened: false, hasOutput: false };
+  resource.input = term.onData((data) => {
+    const socket = resource.socket;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data }));
+  });
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey) {
+      const socket = resource.socket;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data: '\n' }));
+      event.preventDefault();
+      return false;
+    }
+    return true;
+  });
+  cache.set(key, resource);
+  return resource;
+}
+
+function scheduleReconnect(resource: TerminalResource, scheduleFit: () => void) {
+  if (resource.reconnectTimer || !resource.wantEndpoint) return;
+  resource.retries = (resource.retries ?? 0) + 1;
+  const delay = Math.min(3000, 400 * 2 ** Math.min(resource.retries - 1, 3));
+  resource.reconnectTimer = window.setTimeout(() => {
+    resource.reconnectTimer = undefined;
+    if (resource.wantEndpoint) connectTerminal(resource, resource.wantEndpoint, scheduleFit, true);
+  }, delay);
+}
+
+function connectTerminal(resource: TerminalResource, endpoint: string, scheduleFit: () => void, isReconnect = false) {
+  resource.wantEndpoint = endpoint;
+  if (resource.reconnectTimer) { window.clearTimeout(resource.reconnectTimer); resource.reconnectTimer = undefined; }
+
+  const ready = resource.socket?.readyState;
+  if (!isReconnect && resource.endpoint === endpoint && (ready === WebSocket.OPEN || ready === WebSocket.CONNECTING)) {
+    scheduleFit();
+    return;
+  }
+  if (resource.socket && resource.socket.readyState !== WebSocket.CLOSED) {
+    const stale = resource.socket;
+    resource.socket = undefined;
+    stale.close();
+  }
+
+  // On a reconnect, wipe the emulator (clears stale frame + resets mouse/alt-screen
+  // modes that would otherwise echo as garbage) and ask the server to replay the
+  // full buffer so the view reflects the live PTY's current state.
+  if (isReconnect) { resource.term.reset(); resource.hasOutput = false; }
+
+  const replay = resource.hasOutput ? '0' : '1';
+  const socket = new WebSocket(wsUrl(`${endpoint}?replay=${replay}`));
+  resource.endpoint = endpoint;
+  resource.socket = socket;
+  socket.addEventListener('open', () => { resource.retries = 0; scheduleFit(); });
+  socket.addEventListener('message', (event) => {
+    const msg = JSON.parse(event.data as string) as { type?: string; data?: string };
+    if (msg.type === 'output' && typeof msg.data === 'string') {
+      resource.hasOutput = true;
+      resource.term.write(msg.data);
+    }
+  });
+  socket.addEventListener('close', () => {
+    if (resource.socket === socket) {
+      resource.socket = undefined;
+      scheduleReconnect(resource, scheduleFit);
+    }
+  });
+}
+
+function TerminalPane({ roomId, processId }: { roomId?: string; processId?: string }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    const target = terminalTarget(roomId, processId);
+    if (!host || !target) return;
+    const resource = getTerminalResource(target.key);
+    let disposed = false;
+    host.replaceChildren(resource.container);
+    if (!resource.opened) {
+      resource.term.open(resource.container);
+      resource.opened = true;
+    }
+    resource.term.focus();
+
+    const fitAndResize = () => {
+      if (disposed || !host.isConnected || !resource.container.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0) return;
+      const proposed = resource.fit.proposeDimensions();
+      if (!proposed) return;
+      const cols = Math.max(2, proposed.cols - 1);
+      const rows = Math.max(2, proposed.rows);
+      if (resource.term.cols !== cols || resource.term.rows !== rows) resource.term.resize(cols, rows);
+      const socket = resource.socket;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: resource.term.cols, rows: resource.term.rows }));
+    };
+    const scheduleFit = () => {
+      requestAnimationFrame(() => {
+        fitAndResize();
+        requestAnimationFrame(fitAndResize);
+        window.setTimeout(fitAndResize, 50);
+      });
+    };
+    fitAndResize();
+    connectTerminal(resource, target.endpoint, scheduleFit);
+    const observer = new ResizeObserver(scheduleFit);
+    observer.observe(host);
+    observer.observe(resource.container);
+    window.addEventListener('resize', scheduleFit);
+    document.fonts?.ready.then(scheduleFit).catch(() => undefined);
+    scheduleFit();
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      window.removeEventListener('resize', scheduleFit);
+      if (host.contains(resource.container)) host.removeChild(resource.container);
+    };
+  }, [roomId, processId]);
+
+  return <div className="terminal"><div className="terminal-host" ref={hostRef} /></div>;
+}
+
+function ChangesView({ room, status, branch, onCommitted }: { room: Room; status: GitStatus | null; branch: string; onCommitted: () => Promise<void> | void }) {
+  const files = status?.status.files ?? [];
+  const [selected, setSelected] = useState<string | null>(null);
+  const [diff, setDiff] = useState<FileDiff | null>(null);
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const [summary, setSummary] = useState('');
+  const [description, setDescription] = useState('');
+  const [committing, setCommitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const masterRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setExcluded((prev) => { const next = new Set<string>(); for (const file of files) if (prev.has(file.path)) next.add(file.path); return next; });
+    setSelected((current) => (current && files.some((file) => file.path === current)) ? current : (files[0]?.path ?? null));
+  }, [status]);
+
+  useEffect(() => {
+    if (!selected) { setDiff(null); return; }
+    let alive = true;
+    api<FileDiff>(`/api/rooms/${room.id}/git/diff?path=${encodeURIComponent(selected)}`)
+      .then((data) => { if (alive) setDiff(data); })
+      .catch(() => { if (alive) setDiff(null); });
+    return () => { alive = false; };
+  }, [room.id, selected]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
+      if (!files.length) return;
+      const index = Math.max(0, files.findIndex((file) => file.path === selected));
+      const next = event.key === 'ArrowDown' ? Math.min(files.length - 1, index + 1) : Math.max(0, index - 1);
+      setSelected(files[next].path);
+      event.preventDefault();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [files, selected]);
+
+  useEffect(() => { document.querySelector('.chg-file.sel')?.scrollIntoView({ block: 'nearest' }); }, [selected]);
+
+  const included = files.filter((file) => !excluded.has(file.path));
+  const allIncluded = files.length > 0 && included.length === files.length;
+  const noneIncluded = included.length === 0;
+  useEffect(() => { if (masterRef.current) masterRef.current.indeterminate = !allIncluded && !noneIncluded; }, [allIncluded, noneIncluded]);
+
+  function toggle(path: string) {
+    setExcluded((prev) => { const next = new Set(prev); if (next.has(path)) next.delete(path); else next.add(path); return next; });
+  }
+  function toggleAll() {
+    setExcluded((prev) => prev.size === 0 ? new Set(files.map((file) => file.path)) : new Set());
+  }
+
+  async function commit() {
+    if (!summary.trim() || included.length === 0) return;
+    setCommitting(true); setError(null);
+    try {
+      const message = description.trim() ? `${summary.trim()}\n\n${description.trim()}` : summary.trim();
+      await api(`/api/rooms/${room.id}/git/commit`, { method: 'POST', body: JSON.stringify({ message, paths: included.map((file) => file.path) }) });
+      setSummary(''); setDescription('');
+      await onCommitted();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setCommitting(false); }
+  }
+
+  return (
+    <div className="changes">
+      <div className="chg-left">
+        <div className="chg-listhead">
+          <input ref={masterRef} type="checkbox" className="ck" checked={allIncluded} onChange={toggleAll} disabled={!files.length} />
+          <span>{files.length} changed file{files.length === 1 ? '' : 's'}</span>
+        </div>
+        <div className="chg-list">
+          {files.length ? files.map((file) => {
+            const gutter = fileGutter(file);
+            return (
+              <div key={file.path} className={selected === file.path ? 'chg-file sel' : 'chg-file'} onClick={() => setSelected(file.path)}>
+                <input type="checkbox" className="ck" checked={!excluded.has(file.path)} onChange={() => toggle(file.path)} onClick={(event) => event.stopPropagation()} />
+                <span className={`g ${gutter.cls}`}>{gutter.ch}</span>
+                <span className="p">{file.path}</span>
+              </div>
+            );
+          }) : <div className="empty clean">no local changes</div>}
+        </div>
+        <div className="chg-commitbox">
+          <input value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="summary" />
+          <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="description (optional)" rows={3} />
+          {error && <div className="error inline">{error}</div>}
+          <button className="commit-btn" disabled={committing || !summary.trim() || included.length === 0} onClick={commit}>
+            {committing ? 'committing…' : `commit ${included.length} file${included.length === 1 ? '' : 's'} to ${branch || 'branch'}`}
+          </button>
+        </div>
+      </div>
+      <div className="diff-pane">
+        {selected ? (
+          <>
+            <div className="diff-head"><span className="fp">{selected}</span></div>
+            <DiffView text={diff?.fullDiff || diff?.diff || ''} />
+          </>
+        ) : <div className="empty">select a file to view its diff</div>}
+      </div>
+    </div>
+  );
+}
+
+function HistoryView({ room }: { room: Room }) {
+  const [commits, setCommits] = useState<Commit[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [detail, setDetail] = useState<CommitDetail | null>(null);
+  const [file, setFile] = useState<string | null>(null);
+  const [diff, setDiff] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    api<{ commits: Commit[] }>(`/api/rooms/${room.id}/git/log?limit=100`)
+      .then((data) => { if (!alive) return; setCommits(data.commits); setSelected((current) => current ?? data.commits[0]?.hash ?? null); })
+      .catch((err) => { if (alive) setError(err instanceof Error ? err.message : String(err)); });
+    return () => { alive = false; };
+  }, [room.id]);
+
+  useEffect(() => {
+    if (!selected) { setDetail(null); setFile(null); return; }
+    let alive = true;
+    api<CommitDetail>(`/api/rooms/${room.id}/git/commit?hash=${selected}`)
+      .then((data) => { if (!alive) return; setDetail(data); setFile(data.files[0]?.path ?? null); })
+      .catch((err) => { if (alive) setError(err instanceof Error ? err.message : String(err)); });
+    return () => { alive = false; };
+  }, [room.id, selected]);
+
+  useEffect(() => {
+    if (!selected || !file) { setDiff(''); return; }
+    let alive = true;
+    api<{ diff: string }>(`/api/rooms/${room.id}/git/commit-diff?hash=${selected}&path=${encodeURIComponent(file)}`)
+      .then((data) => { if (alive) setDiff(data.diff); })
+      .catch(() => { if (alive) setDiff(''); });
+    return () => { alive = false; };
+  }, [room.id, selected, file]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
+      if (!commits.length) return;
+      const index = Math.max(0, commits.findIndex((commit) => commit.hash === selected));
+      const next = event.key === 'ArrowDown' ? Math.min(commits.length - 1, index + 1) : Math.max(0, index - 1);
+      setSelected(commits[next].hash);
+      event.preventDefault();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [commits, selected]);
+
+  useEffect(() => { document.querySelector('.commit-row.sel')?.scrollIntoView({ block: 'nearest' }); }, [selected]);
+
+  return (
+    <div className="history">
+      <div className="hist-list">
+        {commits.length ? commits.map((commit) => (
+          <div key={commit.hash} className={selected === commit.hash ? 'commit-row sel' : 'commit-row'} onClick={() => setSelected(commit.hash)}>
+            <span className="csub">{commit.subject}</span>
+            <span className="cmeta"><span className="cauthor">{commit.author}</span><span className="cdate">{relTime(commit.date)}</span><span className="chash">{commit.short}</span></span>
+          </div>
+        )) : <div className="empty">{error ?? 'no commits yet'}</div>}
+      </div>
+      <div className="diff-pane">
+        {detail ? (
+          <>
+            <div className="commit-detail-head">
+              <div className="cd-subject">{detail.subject}</div>
+              {detail.body && <div className="cd-body">{detail.body}</div>}
+              <div className="cd-meta"><span>{detail.author}</span><span>{relTime(detail.date)}</span><span className="chash">{detail.short}</span><span>{detail.files.length} file{detail.files.length === 1 ? '' : 's'}</span></div>
+            </div>
+            <div className="cd-files">
+              {detail.files.map((commitFile) => {
+                const cls = COMMIT_STATUS_CLASS[commitFile.status[0]] ?? 'modified';
+                return (
+                  <div key={commitFile.path} className={file === commitFile.path ? 'cd-file sel' : 'cd-file'} onClick={() => setFile(commitFile.path)}>
+                    <span className={`g ${cls}`}>{commitFile.status[0]}</span>
+                    <span className="p">{commitFile.path}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="diff-head"><span className="fp">{file ?? ''}</span></div>
+            <DiffView text={diff} />
+          </>
+        ) : <div className="empty">{error ?? 'select a commit'}</div>}
+      </div>
+    </div>
+  );
+}
+
+function GitPanel({ room }: { room: Room }) {
+  const [view, setView] = useState<'changes' | 'history'>('changes');
+  const [status, setStatus] = useState<GitStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState('');
+  const [newBranch, setNewBranch] = useState('');
+  const [syncing, setSyncing] = useState(false);
+
+  async function refresh() {
+    try { setStatus(await api<GitStatus>(`/api/rooms/${room.id}/git/status`)); setError(null); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+  useEffect(() => { refresh(); }, [room.id]);
+  useEffect(() => {
+    const onFocus = () => { refresh(); };
+    window.addEventListener('focus', onFocus);
+    const timer = view === 'changes' ? window.setInterval(() => { refresh(); }, 4000) : undefined;
+    return () => { window.removeEventListener('focus', onFocus); if (timer) window.clearInterval(timer); };
+  }, [room.id, view]);
+
+  async function gitOp(op: string, body?: unknown) {
+    setError(null);
+    try {
+      const result = await api<{ stdout: string; stderr: string }>(`/api/rooms/${room.id}/git/${op}`, { method: 'POST', body: JSON.stringify(body ?? {}) });
+      setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
+      await refresh();
+      return true;
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); return false; }
+  }
+
+  const branch = status?.status.branch.split('...')[0] ?? room.branch ?? '';
+  const changeCount = status?.status.files.length ?? 0;
+  const ahead = status?.status.ahead ?? 0;
+  const behind = status?.status.behind ?? 0;
+  const hasUpstream = status?.status.hasUpstream ?? false;
+  // GitHub Desktop's single adaptive sync action: pull when behind (incl. diverged),
+  // push when only ahead, publish when no upstream, otherwise fetch.
+  const syncVerb = !hasUpstream ? 'publish' : behind > 0 ? 'pull' : ahead > 0 ? 'push' : 'fetch';
+  const syncOp = syncVerb === 'pull' ? 'pull' : syncVerb === 'fetch' ? 'fetch' : 'push';
+  async function doSync() { setSyncing(true); try { await gitOp(syncOp); } finally { setSyncing(false); } }
+
+  return (
+    <div className="git">
+      <div className="cmdrow">
+        <button className="sync" disabled={syncing} onClick={doSync} title={hasUpstream ? `${syncVerb} origin/${branch}` : 'publish branch to origin'}>
+          <span className="sync-verb">{syncing ? 'syncing…' : syncVerb === 'fetch' ? '⟳ fetch' : syncVerb}</span>
+          {!syncing && (behind > 0 || ahead > 0) && (
+            <span className="sync-counts">
+              {behind > 0 && <span className="dn">↓{behind}</span>}
+              {ahead > 0 && <span className="up">↑{ahead}</span>}
+            </span>
+          )}
+        </button>
+        <span className="branch-sel">
+          <span className="lbl">branch</span>
+          <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
+            {(status?.branches ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+          <input className="nb" value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="new branch" />
+          <button disabled={!newBranch.trim()} onClick={() => gitOp('checkout-new', { branch: newBranch.trim() }).then((ok) => { if (ok) setNewBranch(''); })}>create</button>
+        </span>
+      </div>
+      <div className="git-tabs">
+        <button className={view === 'changes' ? 'gt active' : 'gt'} onClick={() => setView('changes')}>changes{changeCount ? ` ${changeCount}` : ''}</button>
+        <button className={view === 'history' ? 'gt active' : 'gt'} onClick={() => setView('history')}>history</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {view === 'changes'
+        ? <ChangesView room={room} status={status} branch={branch} onCommitted={refresh} />
+        : <HistoryView room={room} />}
+      {note && <div className="gitnote" onClick={() => setNote('')}>{note}</div>}
+    </div>
+  );
+}
+
+function SubagentsPanel({ room, presets }: { room: Room; presets: AgentPreset[] }) {
+  const [processes, setProcesses] = useState<ManagedProcess[]>([]);
+  const [command, setCommand] = useState('hermes chat --tui --source devrooms --accept-hooks --pass-session-id');
+  const [name, setName] = useState('Hermes TUI');
+  const [attached, setAttached] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${room.id}/processes`);
+    setProcesses(data.processes);
+  }
+  useEffect(() => { refresh().catch((err) => setError(err.message)); const timer = setInterval(() => refresh().catch(() => undefined), 3000); return () => clearInterval(timer); }, [room.id]);
+  async function start() {
+    setError(null);
+    const data = await api<{ process: ManagedProcess }>(`/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ command, name }) });
+    setAttached(data.process.id);
+    await refresh();
+  }
+  async function kill(processId: string) { await api(`/api/processes/${processId}`, { method: 'DELETE' }); await refresh(); }
+
+  return (
+    <div className="subs">
+      <div className="presets">
+        {presets.map((preset) => (
+          <button key={preset.id} className={preset.available ? 'preset' : 'preset off'} onClick={() => { setCommand(preset.command); setName(preset.label); }}>
+            <span className="l">{preset.label}</span>
+            <span className="c">{preset.available ? preset.command : `missing: ${preset.command}`}</span>
+          </button>
+        ))}
+      </div>
+      <div className="launcher">
+        <input className="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="process name" />
+        <input className="cmd" value={command} onChange={(event) => setCommand(event.target.value)} placeholder="command" />
+        <button disabled={!command.trim()} onClick={start}>start</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="proclist">
+        {processes.length ? processes.map((proc) => (
+          <div className={attached === proc.id ? 'proc sel' : 'proc'} key={proc.id}>
+            <span className="acts">
+              <button onClick={() => setAttached(proc.id)}>{proc.status === 'running' ? 'attach' : 'log'}</button>
+              <button onClick={() => kill(proc.id)}>{proc.status === 'running' ? 'kill' : 'dismiss'}</button>
+            </span>
+            <span className="pname">{proc.name}</span>
+            <span className="pcmd">{proc.command}</span>
+            <span className={`st ${proc.status}`}>{proc.status}{proc.exitCode !== undefined ? `:${proc.exitCode}` : ''}</span>
+          </div>
+        )) : <div className="empty">no room processes yet</div>}
+      </div>
+      <div className="attached">
+        {attached ? <TerminalPane processId={attached} /> : <div className="empty">start or attach a process to view its terminal</div>}
+      </div>
+    </div>
+  );
+}
+
+export function App() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [presets, setPresets] = useState<AgentPreset[]>([]);
+  const [meta, setMeta] = useState<Meta | null>(null);
+  const [processCounts, setProcessCounts] = useState<ProcessCounts>({});
+  const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>('terminal');
+  const [projectName, setProjectName] = useState('devrooms');
+  const [repoUrl, setRepoUrl] = useState('https://github.com/sbbu/devrooms.git');
+  const [projectPath, setProjectPath] = useState('');
+  const [defaultBranch, setDefaultBranch] = useState('main');
+  const [roomName, setRoomName] = useState('room-a');
+  const [roomBranch, setRoomBranch] = useState('');
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [showNewRoom, setShowNewRoom] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
+  const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId), [rooms, selectedRoomId]);
+  const runningCount = roomProcesses.filter((proc) => proc.status === 'running').length;
+
+  async function refresh() {
+    const [projectData, presetData, metaData] = await Promise.all([
+      api<{ processCounts: ProcessCounts; projects: Project[]; rooms: Room[] }>('/api/projects'),
+      api<{ presets: AgentPreset[] }>('/api/presets'),
+      api<Meta>('/api/meta'),
+    ]);
+    setProjects(projectData.projects); setRooms(projectData.rooms); setProcessCounts(projectData.processCounts ?? {}); setPresets(presetData.presets); setMeta(metaData);
+    if (!selectedProjectId && projectData.projects[0]) setSelectedProjectId(projectData.projects[0].id);
+    if (!selectedRoomId && projectData.rooms[0]) setSelectedRoomId(projectData.rooms[0].id);
+  }
+  useEffect(() => { refresh().catch((err) => setError(err.message)); }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => refresh().catch(() => undefined), 5000);
+    return () => clearInterval(timer);
+  }, [selectedProjectId, selectedRoomId]);
+
+  async function refreshRoomProcesses(roomId: string) {
+    const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
+    setRoomProcesses(data.processes);
+  }
+
+  useEffect(() => {
+    if (!selectedRoom) { setRoomProcesses([]); return; }
+    refreshRoomProcesses(selectedRoom.id).catch(() => undefined);
+    const timer = setInterval(() => refreshRoomProcesses(selectedRoom.id).catch(() => undefined), 3000);
+    return () => clearInterval(timer);
+  }, [selectedRoom?.id]);
+
+  async function createProject() {
+    setBusy(true); setError(null);
+    try {
+      const data = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ name: projectName, repoUrl: repoUrl || undefined, rootPath: projectPath || undefined, defaultBranch }) });
+      setSelectedProjectId(data.project.id);
+      setShowNewProject(false);
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
+  }
+
+  async function createRoom() {
+    if (!selectedProject) return;
+    setBusy(true); setError(null);
+    try {
+      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: roomName, branch: roomBranch || undefined }) });
+      setSelectedRoomId(data.room.id);
+      setShowNewRoom(false);
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
+  }
+
+  async function deleteSelectedRoom() {
+    if (!selectedRoom) return;
+    const deleteFiles = selectedRoom.kind !== 'main';
+    const really = window.confirm(deleteFiles ? `Remove ${selectedRoom.name} from devrooms and delete its files?` : `Remove ${selectedRoom.name} from devrooms? The main repo files will be left untouched.`);
+    if (!really) return;
+    setBusy(true); setError(null);
+    try {
+      await api(`/api/rooms/${selectedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles }) });
+      setSelectedRoomId(null);
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
+  }
+
+  const branchLabel = selectedRoom?.branch ?? selectedProject?.defaultBranch ?? '';
+
+  return (
+    <div className="app">
+      <div className="titlebar">
+        <span className="name">devrooms</span>
+        <span className="meta">
+          <span><span className={meta ? 'dot' : 'dot off'} />{meta ? 'daemon' : 'no daemon'}</span>
+          {meta && <span className="ver">v{meta.version}</span>}
+        </span>
+      </div>
+
+      <div className="split">
+        <aside className="sidebar">
+          <div className="rule">rooms<span className="count">{rooms.length}</span></div>
+          {projects.length ? (
+            <div className="tree">
+              {projects.map((project) => {
+                const projectRooms = rooms.filter((room) => room.projectId === project.id);
+                return (
+                  <Fragment key={project.id}>
+                    <button className={selectedProject?.id === project.id ? 'node project-node proj-active' : 'node project-node'} onClick={() => setSelectedProjectId(project.id)}>
+                      <span className="pname">{project.name}</span>
+                      <span className="branch">{project.defaultBranch}</span>
+                    </button>
+                    {projectRooms.map((room, index) => {
+                      const last = index === projectRooms.length - 1;
+                      const procLabel = compactProc(processCounts[room.id]);
+                      return (
+                        <button
+                          key={room.id}
+                          className={selectedRoom?.id === room.id ? 'node room-node row-sel' : 'node room-node'}
+                          onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
+                        >
+                          <span className="conn">{last ? '└' : '├'}</span>
+                          <span className={`glyph ${room.status}`}>{STATUS_GLYPH[room.status]}</span>
+                          <span className="rname">{room.name}</span>
+                          <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
+                          {procLabel && <span className="count2">{procLabel}</span>}
+                        </button>
+                      );
+                    })}
+                  </Fragment>
+                );
+              })}
+            </div>
+          ) : <div className="empty">no projects yet — add one below</div>}
+
+          <div className="addbar">
+            <button onClick={() => setShowNewRoom((value) => !value)}>+ room</button>
+            <button onClick={() => setShowNewProject((value) => !value)}>+ project</button>
+          </div>
+          {showNewRoom && (
+            <div className="addform">
+              <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
+              <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
+              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />
+              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={createRoom}>clone room</button>
+            </div>
+          )}
+          {showNewProject && (
+            <div className="addform">
+              <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="project name" />
+              <input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="git repo url (for clone rooms)" />
+              <input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="local repo path (optional main room)" />
+              <input value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} placeholder="default branch" />
+              <button className="go" disabled={busy || !projectName.trim() || (!repoUrl.trim() && !projectPath.trim())} onClick={createProject}>save project</button>
+            </div>
+          )}
+        </aside>
+
+        <section className="ws">
+          <div className="ws-head">
+            <div className="ws-title">
+              <span className="rname">{selectedRoom ? selectedRoom.name : 'no room selected'}</span>
+              <span className="rpath">{selectedRoom ? shortPath(selectedRoom.path) : 'create a project or clone a room to begin'}</span>
+            </div>
+            <div className="tabs">
+              <button className={tab === 'terminal' ? 'tab active' : 'tab'} onClick={() => setTab('terminal')}>terminal</button>
+              <button className={tab === 'git' ? 'tab active' : 'tab'} onClick={() => setTab('git')}>git</button>
+              <button className={tab === 'subagents' ? 'tab active' : 'tab'} onClick={() => setTab('subagents')}>subagents</button>
+              <span className="spacer" />
+              <span className="tab-actions">
+                <button onClick={() => refresh()}>refresh</button>
+                {selectedRoom && <button className="danger" onClick={deleteSelectedRoom}>delete</button>}
+              </span>
+            </div>
+          </div>
+
+          {error && <div className="error">{error}</div>}
+          {!selectedRoom && <div className="splash"><strong>no room selected</strong><span>create a project from a local repo for a main room, or clone a separate room</span></div>}
+          {selectedRoom && selectedRoom.status !== 'idle' && (
+            <div className={`splash room-state ${selectedRoom.status}`}>
+              <strong>{selectedRoom.status === 'creating' ? 'cloning room…' : 'room clone failed'}</strong>
+              <span>{selectedRoom.status === 'creating' ? 'cloning in the background — this view refreshes automatically' : selectedRoom.error}</span>
+              <button className="retry" onClick={() => refresh()}>refresh now</button>
+            </div>
+          )}
+          {selectedRoom?.status === 'idle' && (
+            <div className="body">
+              {tab === 'terminal' && <TerminalPane roomId={selectedRoom.id} />}
+              {tab === 'git' && <GitPanel room={selectedRoom} />}
+              {tab === 'subagents' && <SubagentsPanel room={selectedRoom} presets={presets} />}
+            </div>
+          )}
+        </section>
+      </div>
+
+      <div className="statusbar">
+        <span className="brand">devrooms</span>
+        {selectedRoom && <span className="seg">{selectedProject?.name}<span className="arrow">{'›'}</span><span className="b">{selectedRoom.name}</span></span>}
+        {branchLabel && <span className="seg">{branchLabel}</span>}
+        <span className="seg">{'⏵'} {runningCount}/{roomProcesses.length} proc</span>
+        <span className="spacer" />
+        {meta && <span className="seg">{meta.bindHost}:{meta.port}</span>}
+        {meta && <span className="seg">up {formatUptime(meta.uptimeSeconds)}</span>}
+      </div>
+    </div>
+  );
+}
+

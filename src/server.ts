@@ -411,7 +411,10 @@ function parseStatus(raw: string) {
       staged: line.slice(0, 1) !== ' ' && line.slice(0, 1) !== '?',
       dirty: line.slice(1, 2) !== ' ' || line.startsWith('??'),
     }));
-  return { branch, files, raw, dirtyCount: files.length };
+  const ahead = Number(/\bahead (\d+)/.exec(branch)?.[1] ?? 0);
+  const behind = Number(/\bbehind (\d+)/.exec(branch)?.[1] ?? 0);
+  const hasUpstream = branch.includes('...');
+  return { branch, files, raw, dirtyCount: files.length, ahead, behind, hasUpstream };
 }
 
 async function listBranches(room: Room) {
@@ -432,10 +435,18 @@ async function fileDiff(room: Room, file: string) {
     ? await run('git', ['diff', '--no-index', '--', '/dev/null', file], room.path)
     : await runGit(room, ['diff', '--', file]);
   const staged = await runGit(room, ['diff', '--cached', '--', file]);
+  // fullDiff = the entire change vs HEAD (staged + unstaged), i.e. exactly what
+  // a commit of this file would record. Used by the checkbox-based UI.
+  let fullDiff = unstaged.stdout;
+  if (!isUntracked) {
+    const full = await runGit(room, ['diff', 'HEAD', '--', file]).catch(() => null);
+    fullDiff = full ? full.stdout : unstaged.stdout;
+  }
   return {
     path: file,
     diff: unstaged.stdout,
     stagedDiff: staged.stdout,
+    fullDiff,
     status: status.stdout.trim(),
   };
 }
@@ -612,7 +623,7 @@ async function deleteRoom(roomId: string, body: unknown) {
   const state = await getState();
   const room = getRoom(state, roomId);
   if (deleteFiles && room.kind === 'main') {
-    throw new HttpError(400, 'main repo room files are never deleted by Devrooms');
+    throw new HttpError(400, 'main repo room files are never deleted by devrooms');
   }
   deletedRoomTokens.add(roomToken(room));
   const cloneJob = cloneJobs.get(roomId);
@@ -922,6 +933,58 @@ async function main() {
     }
   });
 
+  app.get('/api/rooms/:roomId/git/log', async (req, res) => {
+    try {
+      const state = await getState();
+      const room = getRoom(state, req.params.roomId);
+      const limit = Math.min(Math.max(Number(req.query.limit) || 80, 1), 500);
+      const fmt = ['%H', '%h', '%an', '%ae', '%aI', '%s'].join('%x1f');
+      const out = await runGit(room, ['log', '-n', String(limit), '--no-color', `--pretty=format:${fmt}`]).catch(() => null);
+      const commits = (out?.stdout ?? '').split('\n').filter(Boolean).map((line) => {
+        const [hash, short, author, email, date, subject] = line.split('\x1f');
+        return { hash, short, author, email, date, subject };
+      });
+      res.json({ commits });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
+  app.get('/api/rooms/:roomId/git/commit', async (req, res) => {
+    try {
+      const state = await getState();
+      const room = getRoom(state, req.params.roomId);
+      const hash = requireString(req.query.hash, 'hash');
+      if (!/^[0-9a-fA-F]{4,40}$/.test(hash)) throw new HttpError(400, 'invalid commit hash');
+      const fmt = ['%H', '%h', '%an', '%ae', '%aI', '%s', '%b'].join('%x1f');
+      const meta = await runGit(room, ['show', '-s', '--no-color', `--pretty=format:${fmt}`, hash]);
+      const [cHash, short, author, email, date, subject, ...bodyParts] = meta.stdout.split('\x1f');
+      const namestat = await runGit(room, ['show', '--no-color', '--name-status', '--pretty=format:', hash]);
+      const files = namestat.stdout.split('\n').filter(Boolean).map((line) => {
+        const parts = line.split('\t');
+        return { status: parts[0], path: parts[parts.length - 1] };
+      });
+      res.json({ hash: cHash, short, author, email, date, subject, body: bodyParts.join('\x1f').trimEnd(), files });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
+  app.get('/api/rooms/:roomId/git/commit-diff', async (req, res) => {
+    try {
+      const state = await getState();
+      const room = getRoom(state, req.params.roomId);
+      const hash = requireString(req.query.hash, 'hash');
+      if (!/^[0-9a-fA-F]{4,40}$/.test(hash)) throw new HttpError(400, 'invalid commit hash');
+      const file = requireString(req.query.path, 'path');
+      await assertPathInside(room.path, path.join(room.path, file));
+      const out = await run('git', ['show', '--no-color', '--pretty=format:', hash, '--', file], room.path);
+      res.json({ diff: out.stdout });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
   app.post('/api/rooms/:roomId/git/:op', async (req, res) => {
     try {
       const state = await getState();
@@ -939,7 +1002,9 @@ async function main() {
       } else if (op === 'fetch') {
         result = await runGit(room, ['fetch', '--all', '--prune'], { timeoutMs: 5 * 60_000 });
       } else if (op === 'pull') {
-        result = await runGit(room, ['pull', '--ff-only'], { timeoutMs: 5 * 60_000 });
+        // Fast-forwards when possible; otherwise merges (GitHub Desktop's default
+        // for a diverged branch). --no-edit keeps the merge non-interactive.
+        result = await runGit(room, ['pull', '--no-rebase', '--no-edit'], { timeoutMs: 5 * 60_000 });
       } else if (op === 'push') {
         const branch = await currentBranch(room);
         result = await runGit(room, ['push', '-u', 'origin', branch], { timeoutMs: 5 * 60_000 });
@@ -951,6 +1016,15 @@ async function main() {
         result = await runGit(room, ['checkout', '-b', branch]);
       } else if (op === 'commit') {
         const message = requireString(req.body?.message, 'message');
+        const rawPaths = Array.isArray(req.body?.paths) ? (req.body.paths as unknown[]) : [];
+        const paths = rawPaths.filter((p): p is string => typeof p === 'string' && p.length > 0);
+        if (paths.length) {
+          // Commit exactly the checked files (GitHub Desktop style): clear the
+          // index, stage only the selected paths, then commit.
+          for (const p of paths) await assertPathInside(room.path, path.join(room.path, p));
+          await runGit(room, ['reset', '-q']);
+          await runGit(room, ['add', '--', ...paths]);
+        }
         result = await runGit(room, ['commit', '-m', message]);
       } else {
         throw new HttpError(404, `unknown git operation: ${op}`);
