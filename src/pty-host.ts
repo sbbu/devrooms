@@ -10,7 +10,10 @@ import http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import pty from '@homebridge/node-pty-prebuilt-multiarch';
 
-const PORT = Number(process.env.DEVROOMS_PTY_PORT || 4318);
+// Port comes from a CLI flag (--port N), not an env var: the daemon places the
+// host at <daemon port> + 1. Defaults to 4318 for a standalone run.
+const portFlag = process.argv.indexOf('--port');
+const PORT = portFlag >= 0 ? Number(process.argv[portFlag + 1]) : 4318;
 const HOST = '127.0.0.1';
 
 type Session = {

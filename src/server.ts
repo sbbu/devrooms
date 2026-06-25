@@ -74,14 +74,7 @@ type ManagedProcess = {
   startedAt: string;
   exitedAt?: string;
   exitCode?: number;
-  pty: pty.IPty;
-  log: string[];
-};
-
-type RoomTerminalSession = {
-  roomId: string;
-  status: 'running' | 'exited';
-  pty: pty.IPty;
+  pty?: pty.IPty;
   log: string[];
 };
 
@@ -100,7 +93,6 @@ type AgentPreset = {
 };
 
 const processes = new Map<string, ManagedProcess>();
-const roomTerminals = new Map<string, RoomTerminalSession>();
 const cloneJobs = new Map<string, ChildProcess>();
 const deletedRoomTokens = new Set<string>();
 
@@ -189,8 +181,9 @@ function normalizeState(raw: unknown): State {
 
 async function recoverLostProcesses(state: State) {
   let changed = false;
+  const running = await ptyHostRunningKeys();
   for (const record of Object.values(state.processes)) {
-    if (record.status === 'running' && !processes.has(record.id)) {
+    if (record.status === 'running' && !running.has(`proc:${record.id}`)) {
       record.status = 'lost';
       record.exitedAt = record.exitedAt ?? STARTED_AT;
       record.logTail = `${record.logTail ?? ''}\n[devrooms daemon restarted; PTY is no longer attached]\n`.slice(-4000);
@@ -631,13 +624,16 @@ async function deleteRoom(roomId: string, body: unknown) {
   const cloneJob = cloneJobs.get(roomId);
   if (cloneJob && !cloneJob.killed) cloneJob.kill('SIGTERM');
   cloneJobs.delete(roomId);
-  const running = [...processes.values()].filter((proc) => proc.roomId === roomId && proc.status === 'running');
+  // Liveness lives in the pty-host now, not the in-memory map (which has no
+  // local exit handler and goes stale), so reconcile against the host.
+  const hostRunning = await ptyHostRunningKeys();
+  const running = [...processes.values()].filter((proc) => proc.roomId === roomId && hostRunning.has(`proc:${proc.id}`));
   if (running.length && !force) {
     throw new HttpError(409, `room has ${running.length} running process(es); kill them or pass force=true`);
   }
-  killRoomTerminal(roomId);
+  await killRoomTerminal(roomId);
   for (const proc of running) {
-    proc.pty.kill();
+    await ptyHostKill(`proc:${proc.id}`);
     proc.status = 'exited';
     proc.exitedAt = now();
   }
@@ -669,34 +665,12 @@ function processLogTail(proc: ManagedProcess) {
   return ptyLogTail(proc.log);
 }
 
-function getRoomTerminal(room: Room) {
-  const existing = roomTerminals.get(room.id);
-  if (existing?.status === 'running') return existing;
-  if (existing) roomTerminals.delete(room.id);
-
-  const shell = process.env.SHELL ?? '/bin/zsh';
-  const child = pty.spawn(shell, [], {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 36,
-    cwd: room.path,
-    env: devroomEnv(room),
-  });
-  const session: RoomTerminalSession = { roomId: room.id, status: 'running', pty: child, log: [] };
-  child.onData((data) => appendPtyLog(session.log, data));
-  child.onExit(({ exitCode }) => {
-    session.status = 'exited';
-    appendPtyLog(session.log, `\r\n[devrooms terminal exited: ${exitCode}]\r\n`);
-  });
-  roomTerminals.set(room.id, session);
-  return session;
+async function ensureRoomTerminal(room: Room) {
+  await ptyHostSpawn(`room:${room.id}`, { cwd: room.path, env: devroomEnv(room) });
 }
 
-function killRoomTerminal(roomId: string) {
-  const session = roomTerminals.get(roomId);
-  if (!session) return;
-  if (session.status === 'running') session.pty.kill();
-  roomTerminals.delete(roomId);
+async function killRoomTerminal(roomId: string) {
+  await ptyHostKill(`room:${roomId}`);
 }
 
 function recordFromProcess(proc: ManagedProcess): ProcessRecord {
@@ -748,14 +722,7 @@ function devroomEnv(room: Room): NodeJS.ProcessEnv {
 
 async function spawnProcess(room: Room, command: string, name?: string) {
   const id = `proc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const shell = process.env.SHELL ?? '/bin/zsh';
-  const child = pty.spawn(shell, ['-lc', command], {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 36,
-    cwd: room.path,
-    env: devroomEnv(room),
-  });
+  await ptyHostSpawn(`proc:${id}`, { kind: 'process', command, cwd: room.path, env: devroomEnv(room) });
   const managed: ManagedProcess = {
     id,
     roomId: room.id,
@@ -763,16 +730,8 @@ async function spawnProcess(room: Room, command: string, name?: string) {
     command,
     status: 'running',
     startedAt: now(),
-    pty: child,
     log: [],
   };
-  child.onData((data) => appendPtyLog(managed.log, data));
-  child.onExit(({ exitCode }) => {
-    managed.status = 'exited';
-    managed.exitCode = exitCode;
-    managed.exitedAt = now();
-    void saveProcessRecord(recordFromProcess(managed)).catch((error) => console.error('failed to persist process exit', error));
-  });
   processes.set(id, managed);
   await saveProcessRecord(recordFromProcess(managed));
   return managed;
@@ -826,18 +785,8 @@ function metaSummary(state: State) {
 }
 
 async function killAllProcesses() {
-  for (const session of roomTerminals.values()) {
-    if (session.status === 'running') session.pty.kill();
-  }
-  roomTerminals.clear();
-  for (const proc of processes.values()) {
-    if (proc.status === 'running') {
-      proc.pty.kill();
-      proc.status = 'exited';
-      proc.exitedAt = now();
-      await saveProcessRecord(recordFromProcess(proc));
-    }
-  }
+  // No-op: PTYs live in the standalone pty-host so they survive daemon restarts.
+  // The host is torn down separately (dev runner shutdown / electron quit).
 }
 
 function wirePtySocket(ws: WebSocket, child: pty.IPty, replay = '') {
@@ -857,7 +806,107 @@ function wirePtySocket(ws: WebSocket, child: pty.IPty, replay = '') {
   ws.on('close', () => disposable.dispose());
 }
 
+const PTY_HOST_PORT = PORT + 1;
+const PTY_HOST_URL = `http://127.0.0.1:${PTY_HOST_PORT}`;
+
+async function ptyHostHealthy() {
+  try {
+    const res = await fetch(`${PTY_HOST_URL}/health`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensurePtyHost() {
+  if (await ptyHostHealthy()) return;
+  // Spawn the host detached so it OUTLIVES daemon restarts (the whole point):
+  // a reloaded daemon finds it healthy and reuses it, keeping PTYs alive.
+  const here = fileURLToPath(import.meta.url);
+  const dev = here.endsWith('.ts');
+  const entry = path.join(path.dirname(here), dev ? 'pty-host.ts' : 'pty-host.js');
+  const portArgs = ['--port', String(PTY_HOST_PORT)];
+  const args = dev ? ['--import', 'tsx', entry, ...portArgs] : [entry, ...portArgs];
+  const child = spawn(process.execPath, args, {
+    cwd: path.dirname(here),
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+  for (let i = 0; i < 100; i++) {
+    if (await ptyHostHealthy()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`pty-host did not become healthy at ${PTY_HOST_URL}`);
+}
+
+async function ptyHostRunningKeys(): Promise<Set<string>> {
+  try {
+    const res = await fetch(`${PTY_HOST_URL}/health`);
+    if (!res.ok) return new Set();
+    const data = (await res.json()) as { running?: string[] };
+    return new Set(data.running ?? []);
+  } catch {
+    return new Set();
+  }
+}
+
+async function ptyHostSpawn(key: string, opts: { kind?: 'process'; command?: string; cwd: string; env: NodeJS.ProcessEnv }) {
+  await ensurePtyHost();
+  await fetch(`${PTY_HOST_URL}/spawn`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ key, ...opts }),
+  });
+}
+
+async function ptyHostKill(key: string) {
+  try {
+    await fetch(`${PTY_HOST_URL}/kill`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+  } catch {
+    // host may be down; nothing to do
+  }
+}
+
+async function ptyHostSession(key: string): Promise<{ status: 'running' | 'exited'; exitCode?: number; logTail: string } | null> {
+  try {
+    const res = await fetch(`${PTY_HOST_URL}/session?key=${encodeURIComponent(key)}&max=200000`);
+    if (!res.ok) return null;
+    return (await res.json()) as { status: 'running' | 'exited'; exitCode?: number; logTail: string };
+  } catch {
+    return null;
+  }
+}
+
+// Used only by the packaged app / tests, where the terminal WS hits the daemon.
+// In dev, Vite proxies /ws straight to the host, so this is bypassed entirely.
+function proxyTerminalSocket(client: WebSocket, upstreamUrl: string) {
+  const upstream = new WebSocket(upstreamUrl);
+  const pending: { data: any; binary: boolean }[] = [];
+  client.on('message', (data, binary) => {
+    if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary });
+    else pending.push({ data, binary });
+  });
+  upstream.on('open', () => {
+    for (const item of pending) upstream.send(item.data, { binary: item.binary });
+    pending.length = 0;
+  });
+  upstream.on('message', (data, binary) => {
+    if (client.readyState === WebSocket.OPEN) client.send(data, { binary });
+  });
+  const closeBoth = () => {
+    try { client.close(); } catch { /* noop */ }
+    try { upstream.close(); } catch { /* noop */ }
+  };
+  client.on('close', closeBoth);
+  upstream.on('close', closeBoth);
+  client.on('error', closeBoth);
+  upstream.on('error', closeBoth);
+}
+
 async function main() {
+  await ensurePtyHost().catch((error) => console.error('pty-host unavailable:', error));
   await ensureState();
   const app = express();
   app.use(express.json({ limit: '2mb' }));
@@ -1048,14 +1097,41 @@ async function main() {
 
   app.get('/api/rooms/:roomId/processes', async (req, res) => {
     const state = await getState();
-    const byId = new Map<string, ReturnType<typeof processSummary>>();
-    for (const record of Object.values(state.processes).filter((proc) => proc.roomId === req.params.roomId)) {
-      byId.set(record.id, processSummary(processes.get(record.id) ?? record));
+    const records = Object.values(state.processes).filter((proc) => proc.roomId === req.params.roomId);
+    const running = await ptyHostRunningKeys();
+    const out = await Promise.all(records.map(async (record) => {
+      const live = await ptyHostSession(`proc:${record.id}`);
+      let status: ProcessStatus = record.status;
+      let exitCode = record.exitCode;
+      let logTail = record.logTail ?? '';
+      if (live) {
+        status = live.status;
+        exitCode = live.exitCode ?? exitCode;
+        if (live.logTail) logTail = live.logTail;
+        if (live.status === 'exited' && record.status === 'running') {
+          record.status = 'exited';
+          record.exitCode = exitCode;
+          record.exitedAt = record.exitedAt ?? now();
+          record.logTail = logTail.slice(-4000);
+          await saveProcessRecord(record);
+        }
+      } else if (record.status === 'running' && !running.has(`proc:${record.id}`)) {
+        status = 'lost';
+      }
+      return { id: record.id, roomId: record.roomId, name: record.name, command: record.command, status, startedAt: record.startedAt, exitedAt: record.exitedAt, exitCode, logTail };
+    }));
+    res.json({ processes: out });
+  });
+
+  app.post('/api/rooms/:roomId/terminal', async (req, res) => {
+    try {
+      const state = await getState();
+      const room = getRoom(state, req.params.roomId);
+      await ensureRoomTerminal(room);
+      res.json({ ok: true });
+    } catch (error) {
+      apiError(error, res);
     }
-    for (const proc of [...processes.values()].filter((item) => item.roomId === req.params.roomId)) {
-      byId.set(proc.id, processSummary(proc));
-    }
-    res.json({ processes: [...byId.values()] });
   });
 
   app.post('/api/rooms/:roomId/processes', async (req, res) => {
@@ -1072,17 +1148,20 @@ async function main() {
   });
 
   app.delete('/api/processes/:processId', async (req, res) => {
-    const proc = processes.get(req.params.processId);
-    if (!proc) {
-      const removed = await removeProcessRecord(req.params.processId);
-      if (!removed) return res.status(404).json({ error: 'unknown process' });
-      return res.json({ ok: true, removed: true });
+    const id = req.params.processId;
+    await ptyHostKill(`proc:${id}`);
+    processes.delete(id);
+    const state = await getState();
+    const record = state.processes[id];
+    if (!record) return res.status(404).json({ error: 'unknown process' });
+    if (record.status === 'running') {
+      record.status = 'exited';
+      record.exitedAt = record.exitedAt ?? now();
+      await saveProcessRecord(record);
+      return res.json({ ok: true });
     }
-    if (proc.status === 'running') proc.pty.kill();
-    proc.status = 'exited';
-    proc.exitedAt = now();
-    await saveProcessRecord(recordFromProcess(proc));
-    res.json({ ok: true });
+    await removeProcessRecord(id);
+    res.json({ ok: true, removed: true });
   });
 
   const staticDir = path.join(__dirname, 'client');
@@ -1108,33 +1187,33 @@ async function main() {
         return;
       }
 
-      wss.handleUpgrade(req, socket, head, async (ws) => {
+      // Resolve and ensure the host session BEFORE completing the WebSocket
+      // handshake. proxyTerminalSocket attaches its input listener synchronously
+      // once the handshake finishes; if we awaited the spawn *after* the
+      // handshake, the client would open and could send keystrokes into that gap
+      // before the listener exists — and lose them.
+      let upstreamPath: string;
+      try {
         if (roomTerminal) {
           const state = await getState();
           const room = getRoom(state, roomTerminal[1]);
-          const session = getRoomTerminal(room);
-          const replay = url.searchParams.get('replay') === '0' ? '' : ptyLogTail(session.log, 200_000);
-          wirePtySocket(ws, session.pty, replay);
-          return;
+          await ensureRoomTerminal(room);
+          upstreamPath = `/ws/rooms/${room.id}/terminal`;
+        } else {
+          await ensurePtyHost();
+          upstreamPath = `/ws/processes/${processTerminal![1]}`;
         }
+      } catch (error) {
+        // Finish the handshake only to surface the error to the client, then close.
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          try { ws.send(JSON.stringify({ type: 'output', data: `\r\n[devrooms: ${String(error)}]\r\n` })); } catch { /* noop */ }
+          ws.close();
+        });
+        return;
+      }
 
-        if (processTerminal) {
-          const proc = processes.get(processTerminal[1]);
-          const wantsReplay = url.searchParams.get('replay') !== '0';
-          if (!proc) {
-            const state = await getState();
-            const record = state.processes[processTerminal[1]];
-            if (record) {
-              const replay = wantsReplay && record.logTail ? `${record.logTail}\r\n` : '';
-              ws.send(JSON.stringify({ type: 'output', data: `${replay}[process ${record.status}; PTY is not attached]\r\n` }));
-            } else {
-              ws.send(JSON.stringify({ type: 'output', data: '[unknown process]\r\n' }));
-            }
-            ws.close();
-            return;
-          }
-          wirePtySocket(ws, proc.pty, wantsReplay ? ptyLogTail(proc.log, 200_000) : '');
-        }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        proxyTerminalSocket(ws, `ws://127.0.0.1:${PTY_HOST_PORT}${upstreamPath}${url.search}`);
       });
     } catch (error) {
       console.error(error);

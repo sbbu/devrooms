@@ -5,6 +5,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
+import { killByPort } from './lib-cleanup.mjs';
 
 function run(command, args, cwd) {
   return execFileSync(command, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -229,10 +230,11 @@ try {
   await waitForHealth(base);
   processes = await request(base, `/api/rooms/${room.id}/processes`);
   proc = processes.processes.find((item) => item.id === longRunning.process.id);
-  if (!proc || proc.status !== 'lost' || !proc.logTail.includes('PTY is no longer attached')) throw new Error(`expected lost persisted process after restart: ${JSON.stringify(proc)}`);
+  // PTYs live in the standalone pty-host, so a process SURVIVES a daemon restart.
+  if (!proc || proc.status !== 'running' || !proc.logTail.includes('live-start')) throw new Error(`expected process to survive daemon restart via pty-host: ${JSON.stringify(proc)}`);
   registry = await request(base, '/api/projects');
-  if (registry.processCounts?.[room.id]?.lost !== 1) throw new Error(`missing lost process count: ${JSON.stringify(registry.processCounts)}`);
-  await processWebsocketProbe(port, longRunning.process.id, 'process lost');
+  if (registry.processCounts?.[room.id]?.running !== 1) throw new Error(`expected surviving running process after restart: ${JSON.stringify(registry.processCounts)}`);
+  await processWebsocketProbe(port, longRunning.process.id, 'live-start');
   await request(base, `/api/processes/${longRunning.process.id}`, { method: 'DELETE' });
 
   await roomTerminalReconnectProbe(port, room.id);
@@ -261,10 +263,12 @@ try {
   await request(base, `/api/rooms/${failedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
 
   await stopServer('SIGTERM');
-  server = startServer({ DEVROOMS_PROJECT_PATH: src, DEVROOMS_PROJECT_NAME: 'Local Sample' });
+  // The project name is identity — derived from the repo directory basename
+  // ("src"), never from an env var — so the launched ids follow from basename(src).
+  server = startServer({ DEVROOMS_PROJECT_PATH: src });
   await waitForHealth(base);
-  const launchedRooms = await request(base, '/api/projects/local-sample/rooms');
-  const launchedMain = launchedRooms.rooms.find((item) => item.id === 'local-sample-main');
+  const launchedRooms = await request(base, '/api/projects/src/rooms');
+  const launchedMain = launchedRooms.rooms.find((item) => item.id === 'src-main');
   if (!launchedMain || launchedMain.kind !== 'main' || launchedMain.path !== srcRoot) throw new Error(`launch default main room missing: ${JSON.stringify(launchedRooms)}`);
   await request(base, `/api/rooms/${launchedMain.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: false }) });
 
@@ -274,5 +278,6 @@ try {
   throw error;
 } finally {
   await stopServer('SIGTERM');
+  try { killByPort(port + 1); } catch { /* detached pty-host already gone */ }
   rmSync(root, { recursive: true, force: true });
 }

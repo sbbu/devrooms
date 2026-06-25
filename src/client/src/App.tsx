@@ -133,6 +133,7 @@ type TerminalResource = {
   hasOutput: boolean;
   endpoint?: string;
   wantEndpoint?: string;
+  wantEnsure?: string;
   socket?: WebSocket;
   input?: { dispose(): void };
   reconnectTimer?: number;
@@ -159,8 +160,8 @@ function terminalCache() {
 }
 
 function terminalTarget(roomId?: string, processId?: string) {
-  if (processId) return { key: `process:${processId}`, endpoint: `/ws/processes/${processId}` };
-  if (roomId) return { key: `room:${roomId}`, endpoint: `/ws/rooms/${roomId}/terminal` };
+  if (processId) return { key: `process:${processId}`, endpoint: `/ws/processes/${processId}`, ensure: undefined as string | undefined };
+  if (roomId) return { key: `room:${roomId}`, endpoint: `/ws/rooms/${roomId}/terminal`, ensure: `/api/rooms/${roomId}/terminal` as string | undefined };
   return null;
 }
 
@@ -207,12 +208,13 @@ function scheduleReconnect(resource: TerminalResource, scheduleFit: () => void) 
   const delay = Math.min(3000, 400 * 2 ** Math.min(resource.retries - 1, 3));
   resource.reconnectTimer = window.setTimeout(() => {
     resource.reconnectTimer = undefined;
-    if (resource.wantEndpoint) connectTerminal(resource, resource.wantEndpoint, scheduleFit, true);
+    if (resource.wantEndpoint) void connectTerminal(resource, resource.wantEndpoint, scheduleFit, true, resource.wantEnsure);
   }, delay);
 }
 
-function connectTerminal(resource: TerminalResource, endpoint: string, scheduleFit: () => void, isReconnect = false) {
+async function connectTerminal(resource: TerminalResource, endpoint: string, scheduleFit: () => void, isReconnect = false, ensure?: string) {
   resource.wantEndpoint = endpoint;
+  resource.wantEnsure = ensure;
   if (resource.reconnectTimer) { window.clearTimeout(resource.reconnectTimer); resource.reconnectTimer = undefined; }
 
   const ready = resource.socket?.readyState;
@@ -230,6 +232,14 @@ function connectTerminal(resource: TerminalResource, endpoint: string, scheduleF
   // modes that would otherwise echo as garbage) and ask the server to replay the
   // full buffer so the view reflects the live PTY's current state.
   if (isReconnect) { resource.term.reset(); resource.hasOutput = false; }
+
+  // Ensure the host has spawned this room's PTY before connecting. In dev the WS
+  // goes straight to the pty-host via Vite, so the daemon never sees the connect
+  // and can't lazily spawn it — the client asks the daemon to ensure it first.
+  if (ensure) {
+    try { await fetch(ensure, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); } catch { /* host may already have it */ }
+    if (resource.wantEndpoint !== endpoint) return; // superseded by a newer connect
+  }
 
   const replay = resource.hasOutput ? '0' : '1';
   const socket = new WebSocket(wsUrl(`${endpoint}?replay=${replay}`));
@@ -285,7 +295,7 @@ function TerminalPane({ roomId, processId }: { roomId?: string; processId?: stri
       });
     };
     fitAndResize();
-    connectTerminal(resource, target.endpoint, scheduleFit);
+    void connectTerminal(resource, target.endpoint, scheduleFit, false, target.ensure);
     const observer = new ResizeObserver(scheduleFit);
     observer.observe(host);
     observer.observe(resource.container);

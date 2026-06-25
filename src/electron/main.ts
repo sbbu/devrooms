@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -128,4 +128,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   if (daemon && !daemon.killed) daemon.kill('SIGTERM');
+  // Tear down the detached pty-host (daemon port + 1) on a real app quit.
+  try { execSync(`lsof -ti tcp:${port + 1} -sTCP:LISTEN | xargs kill`, { stdio: 'ignore', shell: '/bin/sh' }); } catch { /* nothing to kill */ }
 });

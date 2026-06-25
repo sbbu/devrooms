@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { killStaleDaemon, killStaleVite, killStaleElectron, waitPortFree } from './lib-cleanup.mjs';
+import { killStaleDaemon, killStaleVite, killStaleElectron, killByPort, waitPortFree } from './lib-cleanup.mjs';
 
 const bin = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const root = process.cwd();
@@ -66,7 +66,9 @@ console.log('[devrooms] cleaning up any previous instance...');
 killStaleDaemon(root, port);
 killStaleVite();
 killStaleElectron(root);
+killByPort(port + 1); // stale pty-host
 await waitPortFree(port);
+await waitPortFree(port + 1);
 
 console.log('[devrooms] compiling Electron main once...');
 const tscOnce = spawnSync(bin('tsc'), ['-p', 'tsconfig.electron.json'], { cwd: root, env: baseEnv, stdio: 'inherit' });
