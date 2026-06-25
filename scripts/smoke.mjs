@@ -134,7 +134,9 @@ let server;
 function startServer(extraEnv = {}) {
   const child = spawn('node', ['dist/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot, ...extraEnv },
+    // HOME points at the temp dir so agent-hook installation (which probes
+    // ~/.config/opencode) never touches the real home during tests.
+    env: { ...process.env, HOME: home, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', (chunk) => { logs += chunk.toString(); });

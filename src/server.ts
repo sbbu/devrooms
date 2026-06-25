@@ -688,7 +688,79 @@ function roomTerminalIds(room: Room) {
 }
 
 async function ensureRoomTerminal(room: Room, terminalId = 'main') {
+  void installAgentStatusHooks(room); // fire-and-forget; never blocks the spawn
   await ptyHostSpawn(roomTerminalKey(room.id, terminalId), { cwd: room.path, env: devroomEnv(room) });
+}
+
+// Explicit per-agent status reporting. Each agent runs a hook on its lifecycle
+// events that emits our private OSC 9279;<state> to the tty, which the pty-host
+// parses into precise thinking / needs-input / done. Best-effort and idempotent;
+// guarded by $DEVROOMS_ROOM_ID so it is a no-op outside devrooms terminals.
+const agentHooksInstalled = new Set<string>();
+let opencodePluginChecked = false;
+
+type ClaudeHookEntry = { matcher?: string; hooks: Array<{ type: string; command: string }> };
+type ClaudeSettings = { hooks?: Record<string, ClaudeHookEntry[]> } & Record<string, unknown>;
+
+function statusHookCommand(state: string) {
+  return `printf '\\033]9279;${state}\\033\\\\' >/dev/tty 2>/dev/null`;
+}
+
+async function installClaudeStatusHooks(room: Room) {
+  const dir = path.join(room.path, '.claude');
+  const file = path.join(dir, 'settings.local.json');
+  let settings: ClaudeSettings = {};
+  try {
+    settings = JSON.parse(await fs.readFile(file, 'utf8')) as ClaudeSettings;
+    if (!settings || typeof settings !== 'object') return; // leave anything unexpected alone
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return; // unreadable/malformed
+  }
+  const hooks = settings.hooks ?? (settings.hooks = {});
+  const events: Array<[string, string]> = [['UserPromptSubmit', 'working'], ['Notification', 'needs-input'], ['Stop', 'done']];
+  let changed = false;
+  for (const [event, state] of events) {
+    const list = hooks[event] ?? (hooks[event] = []);
+    if (JSON.stringify(list).includes('9279')) continue; // ours already present
+    list.push({ matcher: '*', hooks: [{ type: 'command', command: statusHookCommand(state) }] });
+    changed = true;
+  }
+  if (!changed) return;
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(settings, null, 2)}\n`);
+  console.log(`devrooms: installed Claude status hooks -> ${file}`);
+}
+
+async function installOpencodeStatusPlugin() {
+  const configDir = path.join(os.homedir(), '.config', 'opencode');
+  try { await fs.access(configDir); } catch { return; } // not an opencode user — skip
+  const pluginDir = path.join(configDir, 'plugin');
+  const file = path.join(pluginDir, 'devrooms-status.js');
+  try { if ((await fs.readFile(file, 'utf8')).includes('9279')) return; } catch { /* not present yet */ }
+  const content = `// Installed by devrooms — reports agent status to the devrooms sidebar.
+import { writeFileSync } from "node:fs";
+const mark = (s) => { try { if (process.env.DEVROOMS_ROOM_ID) writeFileSync("/dev/tty", "\\u001b]9279;" + s + "\\u001b\\\\"); } catch {} };
+export const DevroomsStatus = async () => ({
+  event: async ({ event }) => {
+    if (event.type === "session.idle") mark("done");
+    else if (event.type === "message.updated") mark("working");
+  },
+});
+`;
+  await fs.mkdir(pluginDir, { recursive: true });
+  await fs.writeFile(file, content);
+  console.log(`devrooms: installed opencode status plugin -> ${file}`);
+}
+
+async function installAgentStatusHooks(room: Room) {
+  if (!agentHooksInstalled.has(room.id)) {
+    agentHooksInstalled.add(room.id);
+    await installClaudeStatusHooks(room).catch((error) => console.log(`devrooms: claude hook install skipped: ${error}`));
+  }
+  if (!opencodePluginChecked) {
+    opencodePluginChecked = true;
+    await installOpencodeStatusPlugin().catch((error) => console.log(`devrooms: opencode plugin install skipped: ${error}`));
+  }
 }
 
 async function killRoomTerminal(roomId: string, terminalId = 'main') {
