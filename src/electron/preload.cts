@@ -6,4 +6,5 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('devrooms', {
   platform: process.platform,
   windowControl: (action: 'minimize' | 'close' | 'fullscreen') => ipcRenderer.send('window:control', action),
+  pickDirectory: (): Promise<string | null> => ipcRenderer.invoke('dialog:openDirectory'),
 });

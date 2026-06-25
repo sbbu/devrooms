@@ -520,7 +520,13 @@ async function assertRepoReachable(repoUrl: string, defaultBranch: string) {
 async function createProject(body: unknown) {
   const input = body as Record<string, unknown>;
   const rootPath = await resolveProjectRoot(input.rootPath);
-  const name = requireString(input.name, 'name');
+  // The project name is identity — when a local repo is picked, derive it from
+  // the repo directory rather than making the user type it.
+  const name = (typeof input.name === 'string' && input.name.trim())
+    ? input.name.trim()
+    : rootPath
+      ? path.basename(rootPath)
+      : requireString(input.name, 'name');
   const suppliedRepoUrl = typeof input.repoUrl === 'string' && input.repoUrl.trim() ? input.repoUrl.trim() : undefined;
   const repoUrl = suppliedRepoUrl ?? rootPath;
   if (!repoUrl) throw new HttpError(400, 'repoUrl is required unless rootPath is set');

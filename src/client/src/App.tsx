@@ -144,7 +144,7 @@ declare global {
   interface Window {
     __DEVROOMS_TERMINALS__?: Map<string, TerminalResource>;
     __DEVROOMS_TERMINAL_UNLOAD_BOUND__?: boolean;
-    devrooms?: { platform: string; windowControl: (action: 'minimize' | 'close' | 'fullscreen') => void };
+    devrooms?: { platform: string; windowControl: (action: 'minimize' | 'close' | 'fullscreen') => void; pickDirectory: () => Promise<string | null> };
   }
 }
 
@@ -657,13 +657,8 @@ export function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('terminal');
-  const [projectName, setProjectName] = useState('devrooms');
-  const [repoUrl, setRepoUrl] = useState('https://github.com/sbbu/devrooms.git');
-  const [projectPath, setProjectPath] = useState('');
-  const [defaultBranch, setDefaultBranch] = useState('main');
   const [roomName, setRoomName] = useState('room-a');
   const [roomBranch, setRoomBranch] = useState('');
-  const [showNewProject, setShowNewProject] = useState(false);
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -701,12 +696,17 @@ export function App() {
     return () => clearInterval(timer);
   }, [selectedRoom?.id]);
 
-  async function createProject() {
+  async function pickProjectFolder() {
+    const pick = window.devrooms?.pickDirectory;
+    if (!pick) { setError('the folder picker is only available in the desktop app'); return; }
+    const dir = await pick();
+    if (!dir) return; // cancelled
     setBusy(true); setError(null);
     try {
-      const data = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ name: projectName, repoUrl: repoUrl || undefined, rootPath: projectPath || undefined, defaultBranch }) });
+      // The daemon resolves the folder to its git root and names the project
+      // after that directory — no path or url is ever typed.
+      const data = await api<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify({ rootPath: dir }) });
       setSelectedProjectId(data.project.id);
-      setShowNewProject(false);
       await refresh();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
@@ -793,11 +793,11 @@ export function App() {
                 );
               })}
             </div>
-          ) : <div className="empty">no projects yet — add one below</div>}
+          ) : <div className="empty">no projects yet — hit + project</div>}
 
           <div className="addbar">
             <button onClick={() => setShowNewRoom((value) => !value)}>+ room</button>
-            <button onClick={() => setShowNewProject((value) => !value)}>+ project</button>
+            <button disabled={busy} onClick={pickProjectFolder}>+ project</button>
           </div>
           {showNewRoom && (
             <div className="addform">
@@ -805,15 +805,6 @@ export function App() {
               <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
               <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />
               <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={createRoom}>clone room</button>
-            </div>
-          )}
-          {showNewProject && (
-            <div className="addform">
-              <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="project name" />
-              <input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="git repo url (for clone rooms)" />
-              <input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} placeholder="local repo path (optional main room)" />
-              <input value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} placeholder="default branch" />
-              <button className="go" disabled={busy || !projectName.trim() || (!repoUrl.trim() && !projectPath.trim())} onClick={createProject}>save project</button>
             </div>
           )}
         </aside>

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
 import path from 'node:path';
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -109,6 +109,16 @@ ipcMain.on('window:control', (event, action: unknown) => {
   if (action === 'minimize') win.minimize();
   else if (action === 'close') win.close();
   else if (action === 'fullscreen') win.setFullScreen(!win.isFullScreen());
+});
+
+ipcMain.handle('dialog:openDirectory', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+  const result = await dialog.showOpenDialog(win!, {
+    title: 'Open a git repository',
+    buttonLabel: 'Open',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
 });
 
 app.whenReady().then(() => {
