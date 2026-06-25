@@ -194,6 +194,16 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .terminal .xterm, .terminal .xterm-viewport, .terminal .xterm-screen { background-color: var(--base); }
 .terminal .xterm { flex: 1; height: 100%; min-height: 0; min-width: 0; overflow: hidden; padding: 0; width: 100%; }
 
+/* tiled terminals: hairline gaps come from the container bg showing through 1px gaps */
+.troom { background: var(--hairline); display: flex; flex: 1; flex-direction: column; gap: 1px; min-height: 0; min-width: 0; }
+.trow { display: flex; flex: 1; gap: 1px; min-height: 0; min-width: 0; }
+.tpane { background: var(--base); display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.tpane .terminal { padding: 2px 6px; }
+.tpane-head { align-items: center; color: var(--dim); display: flex; flex: none; font-size: 11px; justify-content: space-between; padding: 2px 4px 2px 8px; }
+.tpane-head .tlabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpane-x { background: none; border: none; color: var(--faint); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
+.tpane-x:hover { color: var(--red); }
+
 /* ── git panel ─────────────────────────────────────────────────── */
 .git, .subs { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
 

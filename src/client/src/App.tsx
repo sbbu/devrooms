@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
-type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string };
+type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number }; branches: string[]; head: string };
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
@@ -159,10 +159,26 @@ function terminalCache() {
   return window.__DEVROOMS_TERMINALS__;
 }
 
-function terminalTarget(roomId?: string, processId?: string) {
+function terminalTarget(roomId?: string, processId?: string, terminalId?: string) {
   if (processId) return { key: `process:${processId}`, endpoint: `/ws/processes/${processId}`, ensure: undefined as string | undefined };
-  if (roomId) return { key: `room:${roomId}`, endpoint: `/ws/rooms/${roomId}/terminal`, ensure: `/api/rooms/${roomId}/terminal` as string | undefined };
+  if (roomId) {
+    const tid = terminalId ?? 'main';
+    // The main terminal keeps the legacy key/paths so its live session is never
+    // disturbed by this change; extras get a `:<tid>` suffix.
+    if (tid === 'main') return { key: `room:${roomId}`, endpoint: `/ws/rooms/${roomId}/terminal`, ensure: `/api/rooms/${roomId}/terminal` as string | undefined };
+    return { key: `room:${roomId}:${tid}`, endpoint: `/ws/rooms/${roomId}/terminals/${tid}`, ensure: `/api/rooms/${roomId}/terminals/${tid}` as string | undefined };
+  }
   return null;
+}
+
+function disposeTerminalResource(key: string) {
+  const cache = window.__DEVROOMS_TERMINALS__;
+  const resource = cache?.get(key);
+  if (!resource) return;
+  try { resource.socket?.close(); } catch { /* already closed */ }
+  try { resource.input?.dispose(); } catch { /* noop */ }
+  try { resource.term.dispose(); } catch { /* noop */ }
+  cache!.delete(key);
 }
 
 function getTerminalResource(key: string) {
@@ -261,12 +277,12 @@ async function connectTerminal(resource: TerminalResource, endpoint: string, sch
   });
 }
 
-function TerminalPane({ roomId, processId }: { roomId?: string; processId?: string }) {
+function TerminalPane({ roomId, processId, terminalId }: { roomId?: string; processId?: string; terminalId?: string }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
-    const target = terminalTarget(roomId, processId);
+    const target = terminalTarget(roomId, processId, terminalId);
     if (!host || !target) return;
     const resource = getTerminalResource(target.key);
     let disposed = false;
@@ -308,9 +324,50 @@ function TerminalPane({ roomId, processId }: { roomId?: string; processId?: stri
       window.removeEventListener('resize', scheduleFit);
       if (host.contains(resource.container)) host.removeChild(resource.container);
     };
-  }, [roomId, processId]);
+  }, [roomId, processId, terminalId]);
 
   return <div className="terminal"><div className="terminal-host" ref={hostRef} /></div>;
+}
+
+// Split N panes into balanced rows (tmux "tiled" style): roughly square, wider
+// than tall, every pane flexes to fill — no gaps, no manual sizing.
+function tileRows<T>(items: T[]): T[][] {
+  const n = items.length;
+  if (n <= 1) return [items];
+  const rows = Math.round(Math.sqrt(n));
+  const base = Math.floor(n / rows);
+  const extra = n % rows;
+  const out: T[][] = [];
+  let i = 0;
+  for (let r = 0; r < rows; r++) {
+    const count = base + (r < extra ? 1 : 0);
+    out.push(items.slice(i, i + count));
+    i += count;
+  }
+  return out;
+}
+
+function RoomTerminals({ room, onClose }: { room: Room; onClose: (terminalId: string) => void }) {
+  const terminals = room.terminals?.length ? room.terminals : ['main'];
+  // One terminal: render exactly as before — no pane chrome.
+  if (terminals.length === 1) return <TerminalPane roomId={room.id} terminalId={terminals[0]} />;
+  return (
+    <div className="troom">
+      {tileRows(terminals).map((rowItems, r) => (
+        <div className="trow" key={r}>
+          {rowItems.map((tid) => (
+            <div className="tpane" key={tid}>
+              <div className="tpane-head">
+                <span className="tlabel">{tid === 'main' ? 'main' : `term ${terminals.indexOf(tid) + 1}`}</span>
+                {tid !== 'main' && <button className="tpane-x" title="close terminal" onClick={() => onClose(tid)}>×</button>}
+              </div>
+              <TerminalPane roomId={room.id} terminalId={tid} />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function ChangesView({ room, status, branch, onCommitted }: { room: Room; status: GitStatus | null; branch: string; onCommitted: () => Promise<void> | void }) {
@@ -738,6 +795,27 @@ export function App() {
     finally { setBusy(false); }
   }
 
+  async function addTerminal() {
+    if (!selectedRoom) return;
+    setBusy(true); setError(null);
+    try {
+      await api(`/api/rooms/${selectedRoom.id}/terminals`, { method: 'POST' });
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
+  }
+
+  async function closeTerminal(terminalId: string) {
+    if (!selectedRoom) return;
+    setError(null);
+    try {
+      await api(`/api/rooms/${selectedRoom.id}/terminals/${terminalId}`, { method: 'DELETE' });
+      disposeTerminalResource(`room:${selectedRoom.id}:${terminalId}`);
+      await refresh();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
+  const terminalCount = selectedRoom?.terminals?.length ?? 1;
   const branchLabel = selectedRoom?.branch ?? selectedProject?.defaultBranch ?? '';
 
   return (
@@ -821,6 +899,9 @@ export function App() {
               <button className={tab === 'subagents' ? 'tab active' : 'tab'} onClick={() => setTab('subagents')}>subagents</button>
               <span className="spacer" />
               <span className="tab-actions">
+                {tab === 'terminal' && selectedRoom?.status === 'idle' && (
+                  <button onClick={addTerminal} disabled={busy || terminalCount >= 6} title="add a tiled terminal">+ term</button>
+                )}
                 <button onClick={() => refresh()}>refresh</button>
                 {selectedRoom && <button className="danger" onClick={deleteSelectedRoom}>delete</button>}
               </span>
@@ -838,7 +919,7 @@ export function App() {
           )}
           {selectedRoom?.status === 'idle' && (
             <div className="body">
-              {tab === 'terminal' && <TerminalPane roomId={selectedRoom.id} />}
+              {tab === 'terminal' && <RoomTerminals room={selectedRoom} onClose={closeTerminal} />}
               {tab === 'git' && <GitPanel room={selectedRoom} />}
               {tab === 'subagents' && <SubagentsPanel room={selectedRoom} presets={presets} />}
             </div>

@@ -40,6 +40,9 @@ type Room = {
   branch?: string;
   status: 'creating' | 'idle' | 'error';
   error?: string;
+  // Ordered terminal ids tiled inside the room. Absent on legacy rooms — treated
+  // as the single ['main'] terminal. 'main' is always present and never closes.
+  terminals?: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -637,7 +640,7 @@ async function deleteRoom(roomId: string, body: unknown) {
   if (running.length && !force) {
     throw new HttpError(409, `room has ${running.length} running process(es); kill them or pass force=true`);
   }
-  await killRoomTerminal(roomId);
+  await killAllRoomTerminals(room);
   for (const proc of running) {
     await ptyHostKill(`proc:${proc.id}`);
     proc.status = 'exited';
@@ -671,12 +674,29 @@ function processLogTail(proc: ManagedProcess) {
   return ptyLogTail(proc.log);
 }
 
-async function ensureRoomTerminal(room: Room) {
-  await ptyHostSpawn(`room:${room.id}`, { cwd: room.path, env: devroomEnv(room) });
+// A room tiles multiple terminals. The "main" terminal keeps the bare
+// `room:<id>` host key so existing live sessions survive this change untouched;
+// extras are `room:<id>:<terminalId>`.
+const MAX_ROOM_TERMINALS = 6;
+
+function roomTerminalKey(roomId: string, terminalId: string) {
+  return terminalId === 'main' ? `room:${roomId}` : `room:${roomId}:${terminalId}`;
 }
 
-async function killRoomTerminal(roomId: string) {
-  await ptyHostKill(`room:${roomId}`);
+function roomTerminalIds(room: Room) {
+  return room.terminals?.length ? room.terminals : ['main'];
+}
+
+async function ensureRoomTerminal(room: Room, terminalId = 'main') {
+  await ptyHostSpawn(roomTerminalKey(room.id, terminalId), { cwd: room.path, env: devroomEnv(room) });
+}
+
+async function killRoomTerminal(roomId: string, terminalId = 'main') {
+  await ptyHostKill(roomTerminalKey(roomId, terminalId));
+}
+
+async function killAllRoomTerminals(room: Room) {
+  for (const terminalId of roomTerminalIds(room)) await killRoomTerminal(room.id, terminalId);
 }
 
 function recordFromProcess(proc: ManagedProcess): ProcessRecord {
@@ -1140,6 +1160,56 @@ async function main() {
     }
   });
 
+  // Add a tiled terminal to a room.
+  app.post('/api/rooms/:roomId/terminals', async (req, res) => {
+    try {
+      const state = await getState();
+      const room = getRoom(state, req.params.roomId);
+      const terminals = roomTerminalIds(room);
+      if (terminals.length >= MAX_ROOM_TERMINALS) {
+        throw new HttpError(409, `a room can have at most ${MAX_ROOM_TERMINALS} terminals`);
+      }
+      let id = `t${Math.random().toString(36).slice(2, 7)}`;
+      while (terminals.includes(id) || id === 'main') id = `t${Math.random().toString(36).slice(2, 7)}`;
+      room.terminals = [...terminals, id];
+      room.updatedAt = now();
+      await saveState(state);
+      await ensureRoomTerminal(room, id);
+      res.json({ id, terminals: room.terminals });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
+  // Ensure a specific room terminal exists (the client calls this before opening
+  // a pane's socket — in dev the WS goes straight to the host, bypassing the daemon).
+  app.post('/api/rooms/:roomId/terminals/:terminalId', async (req, res) => {
+    try {
+      const state = await getState();
+      const room = getRoom(state, req.params.roomId);
+      await ensureRoomTerminal(room, req.params.terminalId);
+      res.json({ ok: true });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
+  app.delete('/api/rooms/:roomId/terminals/:terminalId', async (req, res) => {
+    try {
+      const state = await getState();
+      const room = getRoom(state, req.params.roomId);
+      const terminalId = req.params.terminalId;
+      if (terminalId === 'main') throw new HttpError(400, 'the main terminal cannot be closed');
+      await killRoomTerminal(room.id, terminalId);
+      room.terminals = roomTerminalIds(room).filter((id) => id !== terminalId);
+      room.updatedAt = now();
+      await saveState(state);
+      res.json({ ok: true, terminals: room.terminals });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
   app.post('/api/rooms/:roomId/processes', async (req, res) => {
     try {
       const state = await getState();
@@ -1186,9 +1256,10 @@ async function main() {
     try {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const roomTerminal = url.pathname.match(/^\/ws\/rooms\/([^/]+)\/terminal$/);
+      const roomTerminalN = url.pathname.match(/^\/ws\/rooms\/([^/]+)\/terminals\/([^/]+)$/);
       const processTerminal = url.pathname.match(/^\/ws\/processes\/([^/]+)$/);
 
-      if (!roomTerminal && !processTerminal) {
+      if (!roomTerminal && !roomTerminalN && !processTerminal) {
         socket.destroy();
         return;
       }
@@ -1205,6 +1276,11 @@ async function main() {
           const room = getRoom(state, roomTerminal[1]);
           await ensureRoomTerminal(room);
           upstreamPath = `/ws/rooms/${room.id}/terminal`;
+        } else if (roomTerminalN) {
+          const state = await getState();
+          const room = getRoom(state, roomTerminalN[1]);
+          await ensureRoomTerminal(room, roomTerminalN[2]);
+          upstreamPath = `/ws/rooms/${room.id}/terminals/${roomTerminalN[2]}`;
         } else {
           await ensurePtyHost();
           upstreamPath = `/ws/processes/${processTerminal![1]}`;

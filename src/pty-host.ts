@@ -136,9 +136,19 @@ function wire(ws: WebSocket, session: Session, replay: string) {
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  // A room can hold several terminals. Key scheme: the "main" terminal keeps the
+  // bare `room:<id>` key (so existing live sessions are untouched), extras are
+  // `room:<id>:<terminalId>`.
   const room = url.pathname.match(/^\/ws\/rooms\/([^/]+)\/terminal$/);
+  const roomTerm = url.pathname.match(/^\/ws\/rooms\/([^/]+)\/terminals\/([^/]+)$/);
   const proc = url.pathname.match(/^\/ws\/processes\/([^/]+)$/);
-  const key = room ? `room:${room[1]}` : proc ? `proc:${proc[1]}` : null;
+  const key = room
+    ? `room:${room[1]}`
+    : roomTerm
+      ? (roomTerm[2] === 'main' ? `room:${roomTerm[1]}` : `room:${roomTerm[1]}:${roomTerm[2]}`)
+      : proc
+        ? `proc:${proc[1]}`
+        : null;
   if (!key) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => {
     const session = sessions.get(key);

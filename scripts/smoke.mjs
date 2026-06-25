@@ -239,6 +239,21 @@ try {
 
   await roomTerminalReconnectProbe(port, room.id);
   await roomWebsocketProbe(port, room.id, `${room.path}|${room.path}|${room.path}`);
+
+  // multiple tiled terminals per room
+  const addedTerm = await request(base, `/api/rooms/${room.id}/terminals`, { method: 'POST' });
+  if (!addedTerm.id || !addedTerm.terminals?.includes('main') || !addedTerm.terminals?.includes(addedTerm.id)) throw new Error(`add terminal failed: ${JSON.stringify(addedTerm)}`);
+  await websocketProbe(
+    `ws://127.0.0.1:${port}/ws/rooms/${room.id}/terminals/${addedTerm.id}`,
+    (ws) => setTimeout(() => ws.send(JSON.stringify({ type: 'input', data: 'printf "extra-term:%s\\n" "$PWD"\n' })), 200),
+    `extra-term:${room.path}`,
+  );
+  const delTerm = await request(base, `/api/rooms/${room.id}/terminals/${addedTerm.id}`, { method: 'DELETE' });
+  if (delTerm.terminals?.includes(addedTerm.id)) throw new Error(`terminal not removed after close: ${JSON.stringify(delTerm)}`);
+  let mainTerminalProtected = false;
+  try { await request(base, `/api/rooms/${room.id}/terminals/main`, { method: 'DELETE' }); } catch (error) { mainTerminalProtected = String(error).includes('400'); }
+  if (!mainTerminalProtected) throw new Error('main terminal must not be closable');
+
   await request(base, `/api/rooms/${room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
 
   let rejectedBadProject = false;
