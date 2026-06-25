@@ -13,10 +13,10 @@ const baseEnv = {
   ...process.env,
   PORT: String(port),
   DEVROOMS_PROJECT_PATH: process.env.DEVROOMS_PROJECT_PATH || root,
-  // Lowercase-normalize: the brand is always lowercase "devrooms", and this also
-  // neutralizes any stale capitalized value inherited from an older process tree.
-  DEVROOMS_PROJECT_NAME: (process.env.DEVROOMS_PROJECT_NAME || 'devrooms').toLowerCase(),
 };
+// The project name is identity, not config — the daemon derives it from the repo
+// dir. Drop any inherited DEVROOMS_PROJECT_NAME so it never travels as an env var.
+delete baseEnv.DEVROOMS_PROJECT_NAME;
 const children = [];
 
 function start(name, command, args, extraEnv = {}) {

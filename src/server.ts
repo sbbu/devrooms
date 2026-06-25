@@ -360,8 +360,10 @@ async function defaultLaunchProject() {
   if (!configuredPath) return undefined;
   const rootPath = await resolveProjectRoot(configuredPath);
   if (!rootPath) return undefined;
-  const name = process.env.DEVROOMS_PROJECT_NAME?.trim() || path.basename(rootPath);
-  const id = slugify(process.env.DEVROOMS_PROJECT_ID?.trim() || name);
+  // The project name is identity, not config: derive it from the repo directory
+  // rather than an env var (per repo rule — names are never env-configured).
+  const name = path.basename(rootPath);
+  const id = slugify(name);
   if (!id) return undefined;
   const repoUrl = process.env.DEVROOMS_PROJECT_REPO_URL?.trim() || rootPath;
   const defaultBranch = process.env.DEVROOMS_PROJECT_BRANCH?.trim() || await branchForPath(rootPath) || await detectDefaultBranch(repoUrl) || 'main';
@@ -726,8 +728,8 @@ async function removeProcessRecord(processId: string) {
   return true;
 }
 
-function devroomEnv(room: Room) {
-  return {
+function devroomEnv(room: Room): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
@@ -739,6 +741,9 @@ function devroomEnv(room: Room) {
     DEVROOMS_PROJECT_ID: room.projectId,
     TERMINAL_CWD: room.path,
   };
+  // The app/project name is never an env var — don't leak it into terminals.
+  delete env.DEVROOMS_PROJECT_NAME;
+  return env;
 }
 
 async function spawnProcess(room: Room, command: string, name?: string) {

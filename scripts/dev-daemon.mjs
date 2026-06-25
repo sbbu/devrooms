@@ -7,10 +7,10 @@ const port = Number(process.env.DEVROOMS_PORT || process.env.PORT || 4317);
 const env = {
   ...process.env,
   DEVROOMS_PROJECT_PATH: process.env.DEVROOMS_PROJECT_PATH || root,
-  // Lowercase-normalize: the brand is always lowercase "devrooms", and this also
-  // neutralizes any stale capitalized value inherited from an older process tree.
-  DEVROOMS_PROJECT_NAME: (process.env.DEVROOMS_PROJECT_NAME || 'devrooms').toLowerCase(),
 };
+// The project name is identity, not config — the daemon derives it from the repo
+// dir. Drop any inherited DEVROOMS_PROJECT_NAME so it never travels as an env var.
+delete env.DEVROOMS_PROJECT_NAME;
 
 // Kill any previous daemon for this repo so daemons never pile up. Only the
 // daemon here (not vite) — `pnpm dev` runs vite concurrently as a sibling.
