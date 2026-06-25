@@ -1,9 +1,9 @@
-# Devrooms Architecture
+# devrooms Architecture
 
 ## Shape
 
 ```text
-Devrooms Electron shell or browser UI
+devrooms Electron shell or browser UI
   -> HTTP/WebSocket daemon on 127.0.0.1
       -> state file
       -> room directories
@@ -44,12 +44,12 @@ The daemon currently binds to `127.0.0.1` only. Do not expose it on a network in
 
 A room is either:
 
-- `main`: a direct pointer to an existing local git checkout for the project. This is the default room when a project has `rootPath`, and it lets Devrooms operate on the main repo without cloning.
+- `main`: a direct pointer to an existing local git checkout for the project. This is the default room when a project has `rootPath`, and it lets devrooms operate on the main repo without cloning.
 - `clone`: a full clone of a project repository under `DEVROOMS_ROOMS_ROOT`. This avoids the state leakage and tooling friction that happen with git worktrees in large JS monorepos.
 
 Clone-room creation is asynchronous: `POST /api/projects/:projectId/rooms` returns `202` with a `creating` room, then the daemon clones in the background and updates the room to `idle` or `error`. The UI polls the registry so long clones do not freeze the app.
 
-Project creation accepts a git repo URL/path and optionally a local `rootPath`. A local `rootPath` is resolved to its git root and automatically creates/updates the project's `main` room. Project creation validates repository reachability and the default branch with `git ls-remote`. Deleting a `creating` room cancels the tracked clone process and tombstones that room generation so late clone completion cannot resurrect stale state. Deleting a `main` room only removes the registry row; Devrooms refuses to delete the main repo's files.
+Project creation accepts a git repo URL/path and optionally a local `rootPath`. A local `rootPath` is resolved to its git root and automatically creates/updates the project's `main` room. Project creation validates repository reachability and the default branch with `git ls-remote`. Deleting a `creating` room cancels the tracked clone process and tombstones that room generation so late clone completion cannot resurrect stale state. Deleting a `main` room only removes the registry row; devrooms refuses to delete the main repo's files.
 
 ## Process model
 
