@@ -422,9 +422,8 @@ function deriveRoomState(activity: RoomActivity | undefined, ackMs: number): Roo
   //    matching "done"/idle, so honoring it directly spun forever. Real output drives
   //    "thinking" (and stops within BUSY_MS of the agent going quiet), which is the
   //    correct signal for both claude and opencode.
-  const latestEvent = !!activity.agentState && activity.agentStateMs >= activity.lastOutputMs - 150;
-  if (latestEvent && activity.agentState === 'needs-input' && activity.agentStateMs > ackMs) return 'needs-input';
-  if (latestEvent && activity.agentState === 'done' && activity.agentStateMs > ackMs) return 'attention';
+  if (activity.agentState === 'needs-input') return activity.agentStateMs > ackMs ? 'needs-input' : 'idle';
+  if (activity.agentState === 'done') return activity.agentStateMs > ackMs ? 'attention' : 'idle';
   if (now - activity.lastOutputMs < BUSY_MS) return 'thinking';
   if (activity.attentionMs > ackMs && activity.attentionMs >= activity.lastOutputMs - 150) return 'attention';
   return 'idle';
