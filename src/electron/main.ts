@@ -111,6 +111,14 @@ ipcMain.on('window:control', (event, action: unknown) => {
   else if (action === 'fullscreen') win.setFullScreen(!win.isFullScreen());
 });
 
+// The renderer pushes the active theme's base color here so the native window
+// background (seen at the frameless corners and while resizing) tracks the theme
+// instead of staying pinned to the dark default it was created with.
+ipcMain.on('window:background', (event, color: unknown) => {
+  if (typeof color !== 'string' || !/^#[0-9a-fA-F]{3,8}$/.test(color)) return;
+  BrowserWindow.fromWebContents(event.sender)?.setBackgroundColor(color);
+});
+
 ipcMain.handle('dialog:openDirectory', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
   const result = await dialog.showOpenDialog(win!, {
