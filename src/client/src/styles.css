@@ -217,6 +217,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .cmdrow .branch-sel { align-items: center; display: flex; gap: 8px; margin-left: auto; }
 .cmdrow .lbl { color: var(--dim); }
 .cmdrow select { padding: 2px 6px; }
+.cmdrow .merge-sel { color: var(--dim); }
 .cmdrow .nb { width: 120px; }
 
 /* adaptive fetch/pull/push button (GitHub Desktop style) */

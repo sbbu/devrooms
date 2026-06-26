@@ -690,11 +690,11 @@ function GitPanel({ room }: { room: Room }) {
         setPushRejected(true);
         setError(null);
         setNote('origin has new commits — pull & merge, then push again');
-      } else if (op === 'pull' && /would be overwritten|commit your changes|please commit|stash/i.test(message)) {
+      } else if ((op === 'pull' || op === 'merge') && /would be overwritten|commit your changes|please commit|stash/i.test(message)) {
         // Dirty working tree blocks the merge. Point at the natural fix instead of a raw error.
         setPushRejected(false);
         setError(null);
-        setNote('you have uncommitted changes — commit them below (or stash) before pull & merge');
+        setNote('you have uncommitted changes — commit them below (or stash) first');
       } else {
         setError(message);
       }
@@ -709,6 +709,7 @@ function GitPanel({ room }: { room: Room }) {
   const hasUpstream = status?.status.hasUpstream ?? false;
   const merging = status?.status.merging ?? false;
   const conflicts = (status?.status.files ?? []).filter((file) => file.conflicted).length;
+  const otherBranches = (status?.branches ?? []).filter((name) => name !== branch);
   const gitError = status?.gitError;
   // One adaptive sync action, in git terms: pull when behind (incl. diverged),
   // otherwise push when there are unpushed commits, otherwise fetch to check.
@@ -750,6 +751,14 @@ function GitPanel({ room }: { room: Room }) {
           <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
             {(status?.branches ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
           </select>
+          {!merging && otherBranches.length > 0 && (
+            // Action menu: stays on "merge…"; picking a branch merges it into the current one.
+            <select className="merge-sel" value="" disabled={syncing} title={`merge another branch into ${branch}`}
+              onChange={(event) => { const src = event.target.value; if (src && window.confirm(`merge ${src} into ${branch}?`)) gitOp('merge', { branch: src }); }}>
+              <option value="" disabled>merge…</option>
+              {otherBranches.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          )}
           <input className="nb" value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="new branch" />
           <button disabled={!newBranch.trim()} onClick={() => gitOp('checkout-new', { branch: newBranch.trim() }).then((ok) => { if (ok) setNewBranch(''); })}>create</button>
         </span>

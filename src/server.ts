@@ -465,6 +465,17 @@ async function currentBranch(room: Room) {
   return result.stdout.trim();
 }
 
+// Resolve a picked branch name to a ref git can merge. The branch picker collapses
+// refs/remotes/origin/* to short names, so a name may exist only as a remote-tracking
+// ref (a branch worked on in another room, fetched but never checked out here). Prefer
+// the local branch; fall back to origin/<name>; otherwise it isn't a branch we can merge.
+async function resolveMergeRef(room: Room, branch: string): Promise<string> {
+  for (const ref of [branch, `origin/${branch}`]) {
+    if ((await run('git', ['rev-parse', '-q', '--verify', `${ref}^{commit}`], room.path)).exitCode === 0) return ref;
+  }
+  throw new HttpError(409, `no such branch to merge: ${branch}`);
+}
+
 async function fileDiff(room: Room, file: string) {
   await assertPathInside(room.path, path.join(room.path, file));
   const status = await runGit(room, ['status', '--porcelain=v1', '--', file]);
@@ -1344,6 +1355,14 @@ async function main() {
       } else if (op === 'checkout-new') {
         const branch = requireString(req.body?.branch, 'branch');
         result = await runGit(room, ['checkout', '-b', branch]);
+      } else if (op === 'merge') {
+        // Merge another branch into the current one. A clean/ff merge succeeds here;
+        // a conflicting merge exits non-zero and leaves MERGE_HEAD, which the status
+        // endpoint surfaces as `merging` so the same conflict UI (resolve → commit
+        // merge / abort) drives it — no separate code path needed for merge vs pull.
+        const branch = requireString(req.body?.branch, 'branch');
+        const ref = await resolveMergeRef(room, branch);
+        result = await runGit(room, ['merge', '--no-edit', ref], { timeoutMs: 5 * 60_000 });
       } else if (op === 'commit') {
         const message = requireString(req.body?.message, 'message');
         const rawPaths = Array.isArray(req.body?.paths) ? (req.body.paths as unknown[]) : [];
