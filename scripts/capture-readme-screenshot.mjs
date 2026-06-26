@@ -148,6 +148,8 @@ async function createFixtureRepos() {
     { name: 'chore/backfill-runner', message: 'chore: stage backfill runner', files: { 'backfill.py': `print('backfill ready')\n` } },
   ]);
 
+  // API creation follows this order; keep atlas-api first so the README capture
+  // opens directly on the dense 2x2 terminal room instead of a quieter repo.
   return [
     { name: 'atlas-api', ...atlas },
     { name: 'devrooms', ...devrooms },
@@ -244,25 +246,38 @@ async function setupDevroomsState(base, repos) {
     terminalIds.push(added.id);
   }
 
-  // Start real subprocesses so process counts and agent activity show up.
+  // Start real subprocesses so process counts and agent activity show up. The
+  // private OSC marker is what devrooms uses for the sidebar "agent thinking"
+  // spinner, so these rooms visibly look alive even when not selected.
+  const roomNamed = (name) => cloneRooms.find((room) => room.name === name) ?? all.rooms.find((room) => room.name === name);
+  async function startClaudeRoom(roomName, task) {
+    const room = roomNamed(roomName);
+    if (!room) return;
+    await api(base, `/api/rooms/${room.id}/processes`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Claude Code',
+        command: `printf '\\033]9279;working\\a[claude-code] ${task}\\n'; i=0; while true; do i=$((i + 1)); printf '[claude-code] %s pass %02d — reading diffs, editing, testing\\n' "${task}" "$i"; sleep 2; done`,
+      }),
+    });
+  }
+
   await api(base, `/api/rooms/${atlasMain.id}/processes`, {
     method: 'POST',
     body: JSON.stringify({
-      name: 'Hermes planner',
-      command: `printf '\\033]9279;working\\a[hermes] planning cache/auth split\\n'; while true; do printf '[hermes] checking next patch slice at %s\\n' "$(date +%H:%M:%S)"; sleep 12; done`,
+      name: 'Claude Code',
+      command: `printf '\\033]9279;working\\a[claude-code] planning cache/auth split\\n'; i=0; while true; do i=$((i + 1)); printf '[claude-code] pass %02d — inspect router → patch tests → rerun smoke\\n' "$i"; sleep 2; done`,
     }),
   });
   await api(base, `/api/rooms/${atlasMain.id}/processes`, {
     method: 'POST',
     body: JSON.stringify({ name: 'test shard', command: 'node --test tests/*.test.mjs' }),
   });
-  const devroomsTerminal = all.rooms.find((room) => room.name === 'terminal-cache');
-  if (devroomsTerminal) {
-    await api(base, `/api/rooms/${devroomsTerminal.id}/processes`, {
-      method: 'POST',
-      body: JSON.stringify({ name: 'OpenCode review', command: `printf '\\033]9279;needs-input\\a[opencode] review complete — waiting for human input\\n'; sleep 300` }),
-    });
-  }
+  await startClaudeRoom('auth-rewrite', 'fix auth timeout regression');
+  await startClaudeRoom('streaming-json', 'benchmark streaming json parser');
+  await startClaudeRoom('terminal-cache', 'review terminal cache lifetime');
+  await startClaudeRoom('mobile-nav', 'tighten mobile sidebar collapse');
+  await startClaudeRoom('backfill-runner', 'add worker backfill checkpoints');
 
   return { atlasMain, terminalIds };
 }
@@ -273,7 +288,7 @@ async function sendTerminal(basePort, roomId, terminalId, command, waitMs = 1300
     const ws = new WebSocket(`ws://127.0.0.1:${basePort}${suffix}?replay=0`);
     const timer = setTimeout(() => { try { ws.close(); } catch {} ; resolve(); }, waitMs);
     ws.on('open', () => {
-      ws.send(JSON.stringify({ type: 'resize', cols: 96, rows: 18 }));
+      ws.send(JSON.stringify({ type: 'resize', cols: 110, rows: 22 }));
       ws.send(JSON.stringify({ type: 'input', data: `${command}\n` }));
     });
     ws.on('error', (error) => { clearTimeout(timer); reject(error); });
@@ -283,12 +298,13 @@ async function sendTerminal(basePort, roomId, terminalId, command, waitMs = 1300
 async function seedTerminalOutput(port, room, terminalIds) {
   const clear = `printf '\\033c'`;
   const commands = [
-    `${clear}; printf '\\033[1;36matlas-api / feature/edge-cache\\033[0m\\n'; git status --short --branch; printf '\\n'; git diff --stat; printf '\\n'; node --test tests/*.test.mjs`,
-    `${clear}; printf '\\033[1;35mbranch stack + recent commits\\033[0m\\n'; git branch --sort=-committerdate --format='%(refname:short)  %(committerdate:relative)' | sed -n '1,8p'; printf '\\n'; git log --oneline --decorate -5`,
-    `${clear}; printf '\\033[1;32mdev server / watcher\\033[0m\\n'; while true; do ms=$(( $(date +%S) % 70 + 18 )); printf '[%s] rebuilt src/router.mjs in %sms — serving /v1/cache/users\\n' "$(date +%H:%M:%S)" "$ms"; sleep 2; done`,
-    `${clear}; printf '\\033[1;33magent handoff\\033[0m\\n'; printf '\\033]9279;working\\a'; printf '[claude] reviewing sidebar state model\\n[codex] drafting cache-route regression\\n[hermes] staging a two-file commit plan\\n\\n'; sed -n '1,12p' docs/plan.md`,
+    `${clear}; i=0; printf '\\033[1;32matlas-api dev server\\033[0m\\n\\n'; while true; do i=$((i + 1)); ms=$((i % 80 + 18)); printf '[%s] %04d GET /v1/cache/users 200 %dms trace=edge-cache auth=rotating\\n' "$(date +%H:%M:%S)" "$i" "$ms"; printf '[%s] %04d POST /v1/auth/session 204 %dms tenant=acme role=admin\\n' "$(date +%H:%M:%S)" "$i" "$((ms + 7))"; sleep 0.25; done`,
+    `${clear}; if command -v nvim >/dev/null 2>&1; then nvim -u NONE -n src/router.mjs; else printf '\\033[1;36mNVIM  src/router.mjs\\033[0m\\n\\n  1 export function route(path) {\\n  2   if (path === \\\"/health\\\") return { ok: true };\\n  3   if (path.startsWith(\\\"/v1/cache\\\")) {\\n  4     return { status: 200, cache: \\\"edge\\\", auth: \\\"rotating\\\" };\\n  5   }\\n  6   if (path === \\\"/auth/session\\\") return { status: 204 };\\n  7   return { status: 404 };\\n  8 }\\n\\n~                                                                               \\n~                                                                               \\n\\033[7mrouter.mjs [+]      8,1           All\\033[0m\\n'; while true; do sleep 60; done; fi`,
+    `${clear}; printf '\\033]9279;working\\a\\033[1;35mClaude Code\\033[0m  atlas-api  feature/edge-cache\\n\\n'; printf 'Goal: harden cache/auth split without breaking smoke.\\n\\n'; printf '  ✓ read src/router.mjs and tests/cache.test.mjs\\n  ✓ found stale session branch around /auth/session\\n  • editing regression test + route guard\\n  • will run node --test tests/*.test.mjs after patch\\n\\n'; while true; do for f in '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'; do printf '\\r%s claude code thinking — editing + testing cache/auth path   ' "$f"; sleep 0.18; done; done`,
+    `${clear}; printf '\\033[1;33mtest + git watch\\033[0m\\n\\n'; while true; do printf 'git status: feature/edge-cache  ± src/router.mjs  ?? tests/cache.test.mjs\\n'; printf 'node:test: router.test.mjs ........ ok  (%sms)\\n' "$(( $(date +%S) % 90 + 30 ))"; printf 'node:test: cache.test.mjs  ........ running edge/auth assertions\\n'; printf 'diffstat: src/router.mjs | 12 +++++++++---   tests/cache.test.mjs | 28 ++++++++++++++++++++++++++++\\n\\n'; sleep 1.4; done`,
   ];
-  for (let i = 0; i < terminalIds.length; i++) await sendTerminal(port, room.id, terminalIds[i], commands[i], i === 2 ? 2800 : 1800);
+  const waits = [5200, 1800, 4200, 4200];
+  for (let i = 0; i < terminalIds.length; i++) await sendTerminal(port, room.id, terminalIds[i], commands[i], waits[i] ?? 1800);
 }
 
 function findChrome() {
@@ -366,7 +382,9 @@ async function main() {
     await waitForHealth(base);
     const { atlasMain, terminalIds } = await setupDevroomsState(base, repos);
     await seedTerminalOutput(port, atlasMain, terminalIds);
-    await new Promise((resolve) => setTimeout(resolve, 2200));
+    // Let the server/test/Claude loops fill their panes and keep sidebar
+    // activity hot before Chrome captures the README shot.
+    await new Promise((resolve) => setTimeout(resolve, 4500));
     await screenshot(port);
     console.log(`wrote ${outputPath}`);
   } catch (error) {
