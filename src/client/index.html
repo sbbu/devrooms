@@ -5,17 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>devrooms</title>
     <script>
-      // Pre-paint: set the window background to the saved mode before the
-      // stylesheet's dark defaults apply, so light-theme users don't get a dark
-      // flash on launch/reload. Inline element styles beat the :root rule;
-      // initTheme() applies the exact theme moments later. Best-effort only.
+      // Pre-paint: seed --base for the saved mode before the stylesheet's dark
+      // defaults apply, so light-theme users don't get a dark flash on launch.
+      // Inline element styles beat the :root rule; initTheme() applies the exact
+      // theme moments later. The background is bound to var(--base) (not a frozen
+      // literal) so it keeps tracking --base when paint()/preview updates it —
+      // otherwise an inline literal would shadow `:root { background: var(--base) }`
+      // and the chrome (sidebar/titlebar/status bar, which have no background of
+      // their own) would never repaint on a theme change. Best-effort only.
       try {
         var cfg = JSON.parse(localStorage.getItem('devrooms.theme') || 'null');
         var ap = (cfg && cfg.appearance) || 'system';
         var dark = ap === 'dark' || (ap !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
         var base = dark ? '#16181d' : '#f7f8fa';
         document.documentElement.style.setProperty('--base', base);
-        document.documentElement.style.background = base;
+        document.documentElement.style.background = 'var(--base)';
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
       } catch (e) { /* no storage / malformed — fall back to stylesheet defaults */ }
     </script>
