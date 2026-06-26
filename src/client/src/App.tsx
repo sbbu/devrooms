@@ -1051,7 +1051,7 @@ export function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('terminal');
-  const [roomName, setRoomName] = useState('room-a');
+  const [roomName, setRoomName] = useState('');
   const [roomBranch, setRoomBranch] = useState('');
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1290,8 +1290,8 @@ export function App() {
       prompt: {
         title: 'clone room', submitLabel: 'clone room',
         fields: [
-          { name: 'name', placeholder: 'room name' },
-          { name: 'branch', placeholder: 'branch — defaults to repo default', optional: true },
+          { name: 'branch', placeholder: 'branch — new or existing (optional)', optional: true },
+          { name: 'name', placeholder: 'name (optional — defaults to the branch)', optional: true },
         ],
       },
       perform: (values) => { void createRoom(values?.name ?? '', values?.branch ?? ''); },
@@ -1414,7 +1414,7 @@ export function App() {
                       const display = room.label ?? room.name;
                       const gs = gitSummary[room.id];
                       const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.dirty ? `${gs.dirty} uncommitted` : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
-                      const meta = `${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
+                      const meta = `${room.branch ? room.branch + ' · ' : ''}${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
                       return (
                         <button
                           key={room.id}
@@ -1428,18 +1428,24 @@ export function App() {
                           {room.status === 'idle'
                             ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
-                          <span className="rname">{display}</span>
-                          {room.label && <span className="rhandle">{room.name}</span>}
-                          {gs && (gs.conflict || gs.dirty > 0 || gs.behind > 0 || gs.unpushed > 0) && (
-                            <span className="gitstate" aria-hidden="true">
-                              {gs.conflict && <span className="gs-conflict" title="merge conflict">!</span>}
-                              {gs.dirty > 0 && <span className="gs-dirty" title={`${gs.dirty} uncommitted change${gs.dirty === 1 ? '' : 's'}`}>±{gs.dirty}</span>}
-                              {gs.behind > 0 && <span className="gs-pull" title={`${gs.behind} to pull`}>↓{gs.behind}</span>}
-                              {gs.unpushed > 0 && <span className="gs-push" title={`${gs.unpushed} to push`}>↑{gs.unpushed}</span>}
+                          <span className="rbody">
+                            <span className="rtop">
+                              <span className="rname">{display}</span>
+                              {gs && (gs.conflict || gs.dirty > 0 || gs.behind > 0 || gs.unpushed > 0) && (
+                                <span className="gitstate" aria-hidden="true">
+                                  {gs.conflict && <span className="gs-conflict" title="merge conflict">!</span>}
+                                  {gs.dirty > 0 && <span className="gs-dirty" title={`${gs.dirty} uncommitted change${gs.dirty === 1 ? '' : 's'}`}>±{gs.dirty}</span>}
+                                  {gs.behind > 0 && <span className="gs-pull" title={`${gs.behind} to pull`}>↓{gs.behind}</span>}
+                                  {gs.unpushed > 0 && <span className="gs-push" title={`${gs.unpushed} to push`}>↑{gs.unpushed}</span>}
+                                </span>
+                              )}
+                              {procLabel && <span className="count2">{procLabel}</span>}
                             </span>
-                          )}
-                          <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
-                          {procLabel && <span className="count2">{procLabel}</span>}
+                            <span className="rsub">
+                              <span className="rbranch">{room.branch || 'main'}</span>
+                              {room.kind !== 'main' && <span className="kind">clone</span>}
+                            </span>
+                          </span>
                           <span className="mark" aria-hidden="true">{mark}</span>
                         </button>
                       );
@@ -1457,9 +1463,9 @@ export function App() {
           {showNewRoom && (
             <div className="addform">
               <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
-              <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
-              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder="branch (repo default)" />
-              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={() => createRoom()}>clone room</button>
+              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder="branch — new or existing (optional)" />
+              <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="name (optional — defaults to the branch)" />
+              <button className="go" disabled={busy || !selectedProject} onClick={() => createRoom()}>clone room</button>
             </div>
           )}
         </aside>

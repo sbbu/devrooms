@@ -599,12 +599,23 @@ async function createProject(body: unknown) {
   return project;
 }
 
+// Next free "room-N" handle for a project, for rooms created without a name.
+function nextRoomHandle(state: State, projectId: string): string {
+  for (let n = 1; ; n += 1) {
+    const candidate = `room-${n}`;
+    if (!state.rooms[slugify(`${projectId}-${candidate}`)]) return candidate;
+  }
+}
+
 async function createRoom(projectId: string, body: unknown) {
   const input = body as Record<string, unknown>;
   const state = await getState();
   const project = getProject(state, projectId);
-  const name = requireString(input.name, 'name');
   const branch = typeof input.branch === 'string' && input.branch.trim() ? input.branch.trim() : undefined;
+  // Name is optional now: fall back to the branch (the user's task identity), then to
+  // an auto "room-N". The display label is derived separately (deriveRoomLabel).
+  const rawName = typeof input.name === 'string' ? input.name.trim() : '';
+  const name = rawName || branch || nextRoomHandle(state, project.id);
   const id = slugify(`${project.id}-${name}`);
   if (!id) throw new HttpError(400, 'room id is empty after slugification');
   if (state.rooms[id]) throw new HttpError(409, `room already exists: ${id}`);

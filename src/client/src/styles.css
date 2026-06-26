@@ -156,14 +156,19 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .project-node:hover { color: var(--fg); }
 .project-node.proj-active .pname { color: var(--cyan); }
 
-.room-node { color: var(--dim); }
+/* room rows are two lines: name + git on top, branch + kind underneath */
+.room-node { align-items: flex-start; color: var(--dim); }
 .room-node .conn { color: var(--faint); }
+.rbody { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
+.rtop { align-items: baseline; display: flex; gap: 7px; min-width: 0; }
 .room-node .rname { color: var(--fg); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.room-node .rhandle { color: var(--faint); flex: none; font-size: 11px; }
-.room-node .kind { color: var(--dim); margin-left: auto; }
-.room-node .count2 { color: var(--yellow); }
+.rtop .gitstate { margin-left: auto; }
+.rtop .count2 { color: var(--yellow); flex: none; }
+.rsub { align-items: baseline; display: flex; gap: 7px; min-width: 0; }
+.room-node .rbranch { color: var(--dim); flex: 0 1 auto; font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rsub .kind { color: var(--faint); flex: none; font-size: 11px; margin-left: auto; }
 /* per-room git signal: merge conflict (red !), commits to pull (↓) / push (↑) */
-.room-node .gitstate { display: inline-flex; gap: 6px; }
+.room-node .gitstate { display: inline-flex; flex: none; gap: 6px; }
 .room-node .gs-conflict { color: var(--red); }
 .room-node .gs-dirty { color: var(--yellow); }
 .room-node .gs-pull, .room-node .gs-push { color: var(--cyan); }
@@ -172,7 +177,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .row-sel { background: var(--cyan); color: var(--base); }
 .row-sel .conn,
 .row-sel .rname,
-.row-sel .rhandle,
+.row-sel .rbranch,
 .row-sel .kind,
 .row-sel .count2,
 .row-sel .mark,
@@ -227,7 +232,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 /* collapsed state: drop labels, center the glyphs, surface the monogram */
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .rhandle, .kind, .count2, .gitstate, .pname, .kbd-hint) { display: none; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rbody, .pname, .kbd-hint) { display: none; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .mark { display: inline; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .node { gap: 4px; justify-content: center; padding: 4px 0; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .project-node { border-top: 1px solid var(--hairline); } /* restores the grouping the ├/└ gave */
