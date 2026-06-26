@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu, screen } from 'electron';
 import path from 'node:path';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -77,9 +77,15 @@ async function ensureDaemon() {
 }
 
 async function createWindow() {
+  // Fill the work area of whichever display devrooms launches on (responsive to
+  // the monitor) rather than a fixed size that leaves dead space on larger
+  // screens. Still a normal window — freely resizable down to the min.
+  const { x, y, width, height } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 940,
+    x,
+    y,
+    width,
+    height,
     minWidth: 480,
     minHeight: 360,
     title: 'devrooms',
