@@ -395,12 +395,16 @@ const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '�
 function deriveRoomState(activity: RoomActivity | undefined, ackMs: number): RoomState {
   if (!activity) return 'idle';
   const now = Date.now(); // same machine as the host, so its ms timestamps are comparable
-  // An explicit hook signal wins when it's the last thing that happened.
-  const explicit = activity.agentState && activity.agentStateMs >= activity.lastOutputMs - 150;
-  if (explicit && activity.agentState === 'working') return 'thinking';
+  // An agent that emits our hook signals (claude, opencode) is authoritative — trust
+  // its reported state and ignore raw output. A TUI like opencode keeps repainting the
+  // screen while idle, so the output heuristic below would otherwise read it as forever
+  // "thinking" and never honor the explicit "done"/"needs-input".
+  if (activity.agentState === 'working') return 'thinking';
+  if (activity.agentState === 'needs-input') return activity.agentStateMs > ackMs ? 'needs-input' : 'idle';
+  if (activity.agentState === 'done') return activity.agentStateMs > ackMs ? 'attention' : 'idle';
+  // Uninstrumented terminal: fall back to raw output (recent bytes = busy) and the
+  // generic desktop-notification escapes (OSC 9 / 777).
   if (now - activity.lastOutputMs < BUSY_MS) return 'thinking';
-  if (explicit && activity.agentStateMs > ackMs && activity.agentState === 'needs-input') return 'needs-input';
-  if (explicit && activity.agentStateMs > ackMs && activity.agentState === 'done') return 'attention';
   if (activity.attentionMs > ackMs && activity.attentionMs >= activity.lastOutputMs - 150) return 'attention';
   return 'idle';
 }
