@@ -57,6 +57,17 @@ async function waitForRoomStatus(base, projectId, roomId, wantedStatus) {
   throw new Error(`room did not become ${wantedStatus}: ${roomId}`);
 }
 
+async function waitForProcess(base, roomId, processId, predicate, label) {
+  let proc;
+  for (let i = 0; i < 80; i++) {
+    const data = await request(base, `/api/rooms/${roomId}/processes`);
+    proc = data.processes.find((item) => item.id === processId);
+    if (proc && predicate(proc)) return proc;
+    await delay(100);
+  }
+  throw new Error(`${label} timed out: ${JSON.stringify(proc)}`);
+}
+
 async function websocketProbe(url, onOpen, expected) {
   const ws = new WebSocket(url);
   let out = '';
@@ -176,10 +187,13 @@ try {
   const mainRoom = localRooms.rooms.find((item) => item.id === 'local-sample-main');
   if (!mainRoom || mainRoom.kind !== 'main' || mainRoom.status !== 'idle' || mainRoom.path !== srcRoot) throw new Error(`missing local main room: ${JSON.stringify(localRooms)}`);
   const mainProc = await request(base, `/api/rooms/${mainRoom.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'main env', command: 'printf "%s|%s|%s|%s\n" "$PWD" "$TERMINAL_CWD" "$DEVROOMS_ROOM_KIND" "$DEVROOMS_ROOM_PATH"' }) });
-  await delay(1000);
-  const mainProcesses = await request(base, `/api/rooms/${mainRoom.id}/processes`);
-  const mainDone = mainProcesses.processes.find((item) => item.id === mainProc.process.id);
-  if (!mainDone || mainDone.exitCode !== 0 || !mainDone.logTail.includes(`${srcRoot}|${srcRoot}|main|${srcRoot}`)) throw new Error('main room process env smoke failed');
+  await waitForProcess(
+    base,
+    mainRoom.id,
+    mainProc.process.id,
+    (proc) => proc.exitCode === 0 && proc.logTail.includes(`${srcRoot}|${srcRoot}|main|${srcRoot}`),
+    'main room process env smoke',
+  );
   await request(base, `/api/rooms/${mainRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: false }) });
 
   await request(base, '/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Sample', repoUrl: remote }) });
@@ -223,13 +237,16 @@ try {
   if (!readFileSync(path.join(roomsRoot, 'sample', 'alpha', 'REMOTE.md'), 'utf8').includes('from remote')) throw new Error('pull did not bring down remote update');
 
   const started = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'smoke', command: 'printf "%s|%s|%s|%s\n" "$PWD" "$TERMINAL_CWD" "$DEVROOMS_ROOM_PATH" "$DEVROOMS_ROOM_ID" && git status --short' }) });
-  await delay(1000);
-  let processes = await request(base, `/api/rooms/${room.id}/processes`);
-  let proc = processes.processes.find((item) => item.id === started.process.id);
-  if (!proc || proc.exitCode !== 0 || !proc.logTail.includes(`${room.path}|${room.path}|${room.path}|${room.id}`)) throw new Error('process cwd/env smoke failed');
+  let proc = await waitForProcess(
+    base,
+    room.id,
+    started.process.id,
+    (item) => item.exitCode === 0 && item.logTail.includes(`${room.path}|${room.path}|${room.path}|${room.id}`),
+    'process cwd/env smoke',
+  );
 
   const longRunning = await request(base, `/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ name: 'long smoke', command: 'printf live-start && sleep 30' }) });
-  processes = await request(base, `/api/rooms/${room.id}/processes`);
+  let processes = await request(base, `/api/rooms/${room.id}/processes`);
   proc = processes.processes.find((item) => item.id === longRunning.process.id);
   if (!proc || proc.status !== 'running') throw new Error(`long-running process was not persisted as running: ${JSON.stringify(proc)}`);
   let registry = await request(base, '/api/projects');

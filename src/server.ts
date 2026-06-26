@@ -992,9 +992,28 @@ function wirePtySocket(ws: WebSocket, child: pty.IPty, replay = '') {
 const PTY_HOST_PORT = PORT + 1;
 const PTY_HOST_URL = `http://127.0.0.1:${PTY_HOST_PORT}`;
 
+// Every pty-host call gets a hard timeout. A wedged host (accepts the TCP connection
+// but never replies — e.g. an orphan left after a crash) must NEVER hang the daemon:
+// at boot, ensurePtyHost runs before app.listen, so an un-timed-out fetch there would
+// stop the window from ever opening.
+async function ptyHostFetch(pathAndQuery: string, init?: RequestInit, timeoutMs = 3000): Promise<Response> {
+  return fetch(`${PTY_HOST_URL}${pathAndQuery}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+}
+
+// Free PTY_HOST_PORT if a wedged predecessor is still holding it, so a fresh host can
+// bind. Best-effort; only called when the existing host is already deemed unhealthy.
+function freePtyHostPort() {
+  if (process.platform === 'win32') return;
+  try {
+    spawnSync('sh', ['-c', `lsof -ti tcp:${PTY_HOST_PORT} | xargs kill -9`], { stdio: 'ignore', timeout: 3000 });
+  } catch {
+    /* noop */
+  }
+}
+
 async function ptyHostHealthy() {
   try {
-    const res = await fetch(`${PTY_HOST_URL}/health`);
+    const res = await ptyHostFetch('/health', undefined, 1500);
     return res.ok;
   } catch {
     return false;
@@ -1003,6 +1022,9 @@ async function ptyHostHealthy() {
 
 async function ensurePtyHost() {
   if (await ptyHostHealthy()) return;
+  // Not healthy: a wedged predecessor may still hold the port and would block a fresh
+  // host from binding — clear it before spawning.
+  freePtyHostPort();
   // Spawn the host detached so it OUTLIVES daemon restarts (the whole point):
   // a reloaded daemon finds it healthy and reuses it, keeping PTYs alive.
   const here = fileURLToPath(import.meta.url);
@@ -1026,7 +1048,7 @@ async function ensurePtyHost() {
 
 async function ptyHostRunningKeys(): Promise<Set<string>> {
   try {
-    const res = await fetch(`${PTY_HOST_URL}/health`);
+    const res = await ptyHostFetch('/health', undefined, 1500);
     if (!res.ok) return new Set();
     const data = (await res.json()) as { running?: string[] };
     return new Set(data.running ?? []);
@@ -1039,7 +1061,7 @@ type HostActivity = { status: string; lastOutputMs: number; attentionMs: number;
 
 async function ptyHostActivity(): Promise<{ now: number; sessions: Record<string, HostActivity> }> {
   try {
-    const res = await fetch(`${PTY_HOST_URL}/activity`);
+    const res = await ptyHostFetch('/activity', undefined, 2000);
     if (!res.ok) return { now: Date.now(), sessions: {} };
     return (await res.json()) as { now: number; sessions: Record<string, HostActivity> };
   } catch {
@@ -1055,16 +1077,16 @@ function roomIdFromKey(key: string): string | null {
 
 async function ptyHostSpawn(key: string, opts: { kind?: 'process'; command?: string; cwd: string; env: NodeJS.ProcessEnv }) {
   await ensurePtyHost();
-  await fetch(`${PTY_HOST_URL}/spawn`, {
+  await ptyHostFetch('/spawn', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ key, ...opts }),
-  });
+  }, 5000);
 }
 
 async function ptyHostKill(key: string) {
   try {
-    await fetch(`${PTY_HOST_URL}/kill`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) });
+    await ptyHostFetch('/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) }, 2000);
   } catch {
     // host may be down; nothing to do
   }
@@ -1072,7 +1094,7 @@ async function ptyHostKill(key: string) {
 
 async function ptyHostSession(key: string): Promise<{ status: 'running' | 'exited'; exitCode?: number; logTail: string } | null> {
   try {
-    const res = await fetch(`${PTY_HOST_URL}/session?key=${encodeURIComponent(key)}&max=200000`);
+    const res = await ptyHostFetch(`/session?key=${encodeURIComponent(key)}&max=200000`, undefined, 5000);
     if (!res.ok) return null;
     return (await res.json()) as { status: 'running' | 'exited'; exitCode?: number; logTail: string };
   } catch {

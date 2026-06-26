@@ -647,9 +647,9 @@ function GitPanel({ room }: { room: Room }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [pushRejected, setPushRejected] = useState(false);
 
-  async function refresh() {
-    try { setStatus(await api<GitStatus>(`/api/rooms/${room.id}/git/status`)); setError(null); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  async function refresh(): Promise<GitStatus | null> {
+    try { const next = await api<GitStatus>(`/api/rooms/${room.id}/git/status`); setStatus(next); setError(null); return next; }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); return null; }
   }
   useEffect(() => { setPushRejected(false); refresh(); }, [room.id]);
   useEffect(() => {
@@ -670,9 +670,19 @@ function GitPanel({ room }: { room: Room }) {
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // Re-read git state right away so the UI reflects reality without waiting for the
+      // poll or a tab switch. Crucially, decide off STATE (is a merge now in progress?)
+      // rather than parsing the error text — a conflicted `git pull` reports its fetch
+      // summary on stderr and the "CONFLICT" lines on stdout, so the message alone lies.
+      const next = await refresh();
+      if (next?.status.merging) {
+        // The merge started but hit conflicts — switch straight to the resolve/commit UI.
+        setPushRejected(false);
+        setError(null);
+        setNote('merge conflicts — resolve the ! files, then commit the merge');
       // Clone room whose origin is a local repo with no real remote: git refuses to push
       // the branch checked out there. pull & merge can't fix it — say so plainly.
-      if (op === 'push' && /checked out branch|denyCurrentBranch/i.test(message)) {
+      } else if (op === 'push' && /checked out branch|denyCurrentBranch/i.test(message)) {
         setPushRejected(false);
         setError(null);
         setNote('cannot push: that branch is checked out in the repo this room was cloned from. work on a room branch, or give the project a remote.');
@@ -682,13 +692,6 @@ function GitPanel({ room }: { room: Room }) {
         setPushRejected(true);
         setError(null);
         setNote('origin has new commits — pull & merge, then push again');
-      } else if (op === 'pull' && /conflict|automatic merge failed|fix conflicts|unmerged/i.test(message)) {
-        // The merge started but hit conflicts. It's not an error to dead-end on:
-        // refresh reveals the merging state, and the UI switches to resolve/commit.
-        setPushRejected(false);
-        setError(null);
-        setNote('merge conflicts — resolve the ! files, then commit the merge');
-        await refresh();
       } else if (op === 'pull' && /would be overwritten|commit your changes|please commit|stash/i.test(message)) {
         // Dirty working tree blocks the merge. Point at the natural fix instead of a raw error.
         setPushRejected(false);
@@ -760,7 +763,7 @@ function GitPanel({ room }: { room: Room }) {
       {error && <div className="error">{error}</div>}
       {gitError && <div className="error">git unavailable: {gitError}</div>}
       {view === 'changes'
-        ? <ChangesView room={room} status={status} branch={branch} onCommitted={refresh} />
+        ? <ChangesView room={room} status={status} branch={branch} onCommitted={() => { refresh(); }} />
         : <HistoryView room={room} reloadKey={reloadKey} />}
       {note && <div className="gitnote" onClick={() => setNote('')}>{note}</div>}
     </div>
