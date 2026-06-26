@@ -799,7 +799,11 @@ type ClaudeHookEntry = { matcher?: string; hooks: Array<{ type: string; command:
 type ClaudeSettings = { hooks?: Record<string, ClaudeHookEntry[]> } & Record<string, unknown>;
 
 function statusHookCommand(state: string) {
-  return `printf '\\033]9279;${state}\\033\\\\' >/dev/tty 2>/dev/null`;
+  // Redirect stderr BEFORE stdout: if there is no controlling terminal, opening
+  // /dev/tty fails, and with `2>/dev/null` already in effect that error is
+  // swallowed instead of leaking as "/dev/tty: Device not configured". `|| true`
+  // keeps the hook's exit status 0 so Claude Code never flags a failed hook.
+  return `printf '\\033]9279;${state}\\033\\\\' 2>/dev/null >/dev/tty || true`;
 }
 
 async function installClaudeStatusHooks(room: Room) {
@@ -817,8 +821,19 @@ async function installClaudeStatusHooks(room: Room) {
   let changed = false;
   for (const [event, state] of events) {
     const list = hooks[event] ?? (hooks[event] = []);
-    if (JSON.stringify(list).includes('9279')) continue; // ours already present
-    list.push({ matcher: '*', hooks: [{ type: 'command', command: statusHookCommand(state) }] });
+    const command = statusHookCommand(state);
+    // Find a previously-installed devrooms hook by its 9279 marker. If present but
+    // using an older command form, heal it in place; otherwise install fresh. This
+    // upgrades existing rooms instead of leaving stale (e.g. /dev/tty-erroring) hooks.
+    const ours = list.find((entry) => entry.hooks?.some((h) => h.command?.includes('9279')));
+    if (ours) {
+      if (ours.hooks.length === 1 && ours.hooks[0]?.command === command) continue; // already current
+      ours.matcher = '*';
+      ours.hooks = [{ type: 'command', command }];
+      changed = true;
+      continue;
+    }
+    list.push({ matcher: '*', hooks: [{ type: 'command', command }] });
     changed = true;
   }
   if (!changed) return;
