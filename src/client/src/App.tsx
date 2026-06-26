@@ -415,15 +415,16 @@ const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '�
 function deriveRoomState(activity: RoomActivity | undefined, ackMs: number): RoomState {
   if (!activity) return 'idle';
   const now = Date.now(); // same machine as the host, so its ms timestamps are comparable
-  // An agent that emits our hook signals (claude, opencode) is authoritative — trust
-  // its reported state and ignore raw output. A TUI like opencode keeps repainting the
-  // screen while idle, so the output heuristic below would otherwise read it as forever
-  // "thinking" and never honor the explicit "done"/"needs-input".
-  if (activity.agentState === 'working') return 'thinking';
-  if (activity.agentState === 'needs-input') return activity.agentStateMs > ackMs ? 'needs-input' : 'idle';
-  if (activity.agentState === 'done') return activity.agentStateMs > ackMs ? 'attention' : 'idle';
-  // Uninstrumented terminal: fall back to raw output (recent bytes = busy) and the
-  // generic desktop-notification escapes (OSC 9 / 777).
+  // An explicit hook state only counts while it's the LATEST thing the agent did — its
+  // OSC was the last output, nothing real has happened since. That gates two things:
+  //  - a stale "done"/"needs-input" doesn't linger after the agent resumed, and
+  //  - "working" is NOT treated as sticky. opencode emits "working" but often never a
+  //    matching "done"/idle, so honoring it directly spun forever. Real output drives
+  //    "thinking" (and stops within BUSY_MS of the agent going quiet), which is the
+  //    correct signal for both claude and opencode.
+  const latestEvent = !!activity.agentState && activity.agentStateMs >= activity.lastOutputMs - 150;
+  if (latestEvent && activity.agentState === 'needs-input' && activity.agentStateMs > ackMs) return 'needs-input';
+  if (latestEvent && activity.agentState === 'done' && activity.agentStateMs > ackMs) return 'attention';
   if (now - activity.lastOutputMs < BUSY_MS) return 'thinking';
   if (activity.attentionMs > ackMs && activity.attentionMs >= activity.lastOutputMs - 150) return 'attention';
   return 'idle';
