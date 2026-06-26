@@ -6,6 +6,7 @@
   --surface: #1c1f26;     /* lifted: selected secondary rows, focused fills */
   --hairline: #2a2e37;    /* every 1px rule and border */
   --hairline-2: #353a45;  /* focused field border */
+  --selection: #2a3340;   /* text selection (themes override; see themes.ts) */
 
   /* text */
   --fg: #c5c8d0;          /* primary */
@@ -32,7 +33,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; }
-::selection { background: #2a3340; }
+::selection { background: var(--selection); }
 
 button, input, select, textarea { font: inherit; color: inherit; }
 
@@ -367,11 +368,11 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .dl { display: flex; }
 .dl .ln { border-right: 1px solid var(--hairline); color: var(--faint); flex: none; font-size: 12px; padding: 0 6px; text-align: right; user-select: none; width: 44px; }
 .dl .dc { color: var(--fg); flex: 1; font-size: 12px; min-width: 0; overflow-wrap: anywhere; padding: 0 10px; white-space: pre-wrap; }
-.dl.add { background: rgba(138, 168, 114, 0.10); }
+.dl.add { background: color-mix(in srgb, var(--green) 12%, transparent); }
 .dl.add .dc { color: var(--green); }
-.dl.del { background: rgba(201, 123, 123, 0.10); }
+.dl.del { background: color-mix(in srgb, var(--red) 12%, transparent); }
 .dl.del .dc { color: var(--red); }
-.dl.hunk { background: rgba(127, 180, 202, 0.07); }
+.dl.hunk { background: color-mix(in srgb, var(--cyan) 9%, transparent); }
 .dl.hunk .dc, .dl.hunk .ln { color: var(--cyan); }
 .dl.meta .dc { color: var(--dim); }
 
@@ -489,3 +490,56 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 @media (max-width: 460px) {
   .titlebar .meta { display: none; }
 }
+
+/* ── command palette (⌘P) ──────────────────────────────────────── */
+/* the ⌘P chip in the title bar */
+.palette-hint { border: 1px solid var(--hairline); color: var(--dim); font-size: 11px; letter-spacing: 0.02em; padding: 1px 7px; }
+.palette-hint:hover { border-color: var(--hairline-2); color: var(--fg); }
+
+/* the clickable theme readout in the status bar */
+.statusbar .theme-seg { color: var(--dim); height: 100%; }
+.statusbar .theme-seg:hover { color: var(--fg); }
+.theme-chip { display: inline-block; height: 8px; width: 8px; }
+
+.cmd-overlay {
+  align-items: flex-start;
+  /* fixed dark scrim so the backdrop dims in light themes too, not just dark */
+  background: rgba(8, 8, 10, 0.5);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding-top: 12vh;
+  position: fixed;
+  -webkit-app-region: no-drag;
+  z-index: 50;
+}
+.cmd {
+  background: var(--base);
+  border: 1px solid var(--hairline-2);
+  box-shadow: 0 18px 64px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  max-height: 70vh;
+  width: min(640px, calc(100vw - 48px));
+}
+.cmd-input { align-items: center; border-bottom: 1px solid var(--hairline); display: flex; gap: 8px; padding: 10px 12px; }
+.cmd-crumb { align-items: center; color: var(--cyan); display: inline-flex; gap: 7px; white-space: nowrap; }
+.cmd-crumb-sep { color: var(--faint); }
+.cmd-input input { background: none; border: none; color: var(--fg); flex: 1; font-size: 14px; padding: 0; }
+.cmd-input input:focus { border: none; outline: none; }
+.cmd-input input::placeholder { color: var(--faint); }
+
+.cmd-list { overflow-y: auto; padding: 4px 0; }
+.cmd-row { align-items: center; cursor: pointer; display: flex; gap: 10px; padding: 6px 12px; }
+.cmd-row.sel { background: var(--surface); box-shadow: inset 2px 0 0 var(--cyan); }
+.cmd-main { align-items: baseline; display: flex; flex: 1; gap: 10px; min-width: 0; }
+.cmd-title { color: var(--fg); white-space: nowrap; }
+.cmd-row.sel .cmd-title { color: var(--cyan); }
+.cmd-hint { color: var(--dim); flex: 1; font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-tag { color: var(--dim); flex: none; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.cmd-check { color: var(--cyan); flex: none; font-size: 9px; }
+.cmd-swatches { border: 1px solid var(--hairline); display: inline-flex; flex: none; }
+.cmd-swatch { height: 16px; width: 10px; }
+.cmd-empty { color: var(--dim); padding: 16px 12px; }
+.cmd-foot { border-top: 1px solid var(--hairline); color: var(--dim); display: flex; font-size: 11px; gap: 16px; padding: 6px 12px; }
+.cmd-foot kbd { background: var(--surface); border: 1px solid var(--hairline); color: var(--dim); font: inherit; font-size: 10px; margin-right: 3px; padding: 0 4px; }
