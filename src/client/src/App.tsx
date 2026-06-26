@@ -917,7 +917,7 @@ export function App() {
     try { localStorage.setItem('devrooms.rail', 'full'); } catch { /* storage may be unavailable */ }
     setRailPref('full');
   }
-  const shortcutHint = /mac|darwin/i.test(window.devrooms?.platform ?? navigator.platform ?? '') ? '⌘B' : 'Ctrl+B';
+  const shortcutHint = /mac|darwin/i.test(window.devrooms?.platform ?? navigator.platform ?? '') ? '⌘b' : 'ctrl+b';
 
   async function refresh() {
     const [projectData, presetData, metaData] = await Promise.all([
@@ -1007,11 +1007,11 @@ export function App() {
     finally { setBusy(false); }
   }
 
-  async function createRoom() {
-    if (!selectedProject) return;
+  async function createRoom(name = roomName, branch = roomBranch) {
+    if (!selectedProject || !name.trim()) return;
     setBusy(true); setError(null);
     try {
-      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: roomName, branch: roomBranch || undefined }) });
+      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: name.trim(), branch: branch.trim() || undefined }) });
       setSelectedRoomId(data.room.id);
       setShowNewRoom(false);
       await refresh();
@@ -1059,18 +1059,30 @@ export function App() {
   // App actions surfaced in the command palette (Theme + Appearance are added by
   // the palette itself). Rebuilt each render so the closures see current state.
   const commands: Command[] = [
-    { id: 'go-terminal', title: 'Go to Terminal', hint: 'Show the terminal tab', keywords: 'terminal shell view', perform: () => setTab('terminal') },
-    { id: 'go-git', title: 'Go to Git', hint: 'Show the git tab', keywords: 'git diff changes commit', perform: () => setTab('git') },
-    { id: 'go-subagents', title: 'Go to Subagents', hint: 'Show the subagents tab', keywords: 'agents processes hermes claude codex', perform: () => setTab('subagents') },
-    { id: 'refresh', title: 'Refresh', hint: 'Reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
-    { id: 'new-room', title: 'New Room…', hint: 'Clone a room into this project', keywords: 'clone create', perform: () => setShowNewRoom((value) => !value) },
-    { id: 'new-project', title: 'New Project…', hint: 'Pick a local repo folder', keywords: 'folder repo open add', perform: () => { void pickProjectFolder(); } },
+    { id: 'go-terminal', title: 'go to terminal', hint: 'show the terminal tab', keywords: 'terminal shell view', perform: () => setTab('terminal') },
+    { id: 'go-git', title: 'go to git', hint: 'show the git tab', keywords: 'git diff changes commit', perform: () => setTab('git') },
+    { id: 'go-subagents', title: 'go to subagents', hint: 'show the subagents tab', keywords: 'agents processes hermes claude codex', perform: () => setTab('subagents') },
+    { id: 'refresh', title: 'refresh', hint: 'reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
+    {
+      id: 'new-room', title: 'clone room…',
+      hint: selectedProject ? `clone a room into ${selectedProject.name}` : 'clone a room into this project',
+      keywords: 'clone create new room',
+      prompt: {
+        title: 'clone room', submitLabel: 'clone room',
+        fields: [
+          { name: 'name', placeholder: 'room name' },
+          { name: 'branch', placeholder: `branch — defaults to ${selectedProject?.defaultBranch ?? 'project default'}`, optional: true },
+        ],
+      },
+      perform: (values) => { void createRoom(values?.name ?? '', values?.branch ?? ''); },
+    },
+    { id: 'new-project', title: 'new project…', hint: 'pick a local repo folder', keywords: 'folder repo open add', perform: () => { void pickProjectFolder(); } },
   ];
   if (selectedRoom?.status === 'idle' && terminalCount < 6) {
-    commands.splice(1, 0, { id: 'new-terminal', title: 'New Terminal', hint: 'Add a tiled terminal to this room', keywords: 'split pane add tiled', perform: () => { void addTerminal(); } });
+    commands.splice(1, 0, { id: 'new-terminal', title: 'new terminal', hint: 'add a tiled terminal to this room', keywords: 'split pane add tiled', perform: () => { void addTerminal(); } });
   }
   if (selectedRoom) {
-    commands.push({ id: 'delete-room', title: 'Delete Current Room', hint: selectedRoom.name, keywords: 'remove destroy', perform: () => { void deleteSelectedRoom(); } });
+    commands.push({ id: 'delete-room', title: 'delete current room', hint: selectedRoom.name, keywords: 'remove destroy', perform: () => { void deleteSelectedRoom(); } });
   }
 
   const activeTheme = resolveTheme(getConfig());
@@ -1089,7 +1101,7 @@ export function App() {
           <span className="name">devrooms</span>
         </span>
         <span className="meta">
-          <button className="palette-hint" onClick={() => setPaletteOpen(true)} title="Command palette">{window.devrooms?.platform === 'darwin' ? '⌘' : 'Ctrl'} P</button>
+          <button className="palette-hint" onClick={() => setPaletteOpen(true)} title="command palette">{window.devrooms?.platform === 'darwin' ? '⌘' : 'ctrl'} p</button>
           <span><span className={meta ? 'dot' : 'dot off'} />{meta ? 'daemon' : 'no daemon'}</span>
           {meta && <span className="ver">v{meta.version}</span>}
         </span>
@@ -1101,7 +1113,7 @@ export function App() {
             <button
               className="rail-toggle"
               disabled={forcedMini}
-              aria-label={miniRail ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label={miniRail ? 'expand sidebar' : 'collapse sidebar'}
               aria-expanded={!miniRail}
               title={forcedMini ? 'widen the window to pin the sidebar open' : miniRail ? `expand sidebar (${shortcutHint})` : `collapse sidebar (${shortcutHint})`}
               onClick={toggleRail}
@@ -1158,7 +1170,7 @@ export function App() {
               <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
               <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
               <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />
-              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={createRoom}>clone room</button>
+              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={() => createRoom()}>clone room</button>
             </div>
           )}
         </aside>
@@ -1209,7 +1221,7 @@ export function App() {
         {branchLabel && <span className="seg">{branchLabel}</span>}
         <span className="seg">{'⏵'} {runningCount}/{roomProcesses.length} proc</span>
         <span className="spacer" />
-        <button className="seg theme-seg" onClick={() => setPaletteOpen(true)} title="Change theme (⌘P)"><span className="theme-chip" style={{ background: activeTheme.ui.cyan }} />{activeTheme.name}</button>
+        <button className="seg theme-seg" onClick={() => setPaletteOpen(true)} title="change theme (⌘p)"><span className="theme-chip" style={{ background: activeTheme.ui.cyan }} />{activeTheme.name.toLowerCase()}</button>
         {meta && <span className="seg">{meta.bindHost}:{meta.port}</span>}
         {meta && <span className="seg">up {formatUptime(meta.uptimeSeconds)}</span>}
       </div>
