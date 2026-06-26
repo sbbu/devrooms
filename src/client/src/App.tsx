@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { CommandPalette, score, type Command } from './CommandPalette';
 import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
+import hljs from 'highlight.js/lib/common';
 
 // Keyboard-shortcut modifier for hints + handlers: ⌘ on macOS (never reaches the
 // PTY, so shortcuts fire even with the terminal focused), Ctrl elsewhere.
@@ -115,27 +116,56 @@ function relAge(unixSec: number) {
 
 const COMMIT_STATUS_CLASS: Record<string, string> = { A: 'new', M: 'modified', D: 'del', R: 'staged', C: 'staged' };
 
-type DiffRow = { type: 'hunk' | 'meta' | 'add' | 'del' | 'ctx'; text: string; oldNo?: number; newNo?: number };
+type DiffRow = { type: 'hunk' | 'meta' | 'add' | 'del' | 'ctx'; text: string; oldNo?: number; newNo?: number; lang?: string };
+
+// Map a file path to a highlight.js language id, but only one the bundled
+// `common` set actually registers (else we fall back to plain text).
+const HL_EXT: Record<string, string> = {
+  ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  json: 'json', jsonc: 'json', json5: 'json',
+  css: 'css', scss: 'scss', sass: 'scss', less: 'less',
+  html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', vue: 'xml',
+  md: 'markdown', markdown: 'markdown', mdx: 'markdown',
+  yml: 'yaml', yaml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini', conf: 'ini',
+  sh: 'bash', bash: 'bash', zsh: 'bash',
+  py: 'python', rb: 'ruby', go: 'go', rs: 'rust',
+  java: 'java', kt: 'kotlin', kts: 'kotlin',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp',
+  cs: 'csharp', php: 'php', sql: 'sql', swift: 'swift', lua: 'lua',
+  r: 'r', pl: 'perl', pm: 'perl', graphql: 'graphql', gql: 'graphql',
+  diff: 'diff', patch: 'diff', make: 'makefile', mk: 'makefile', dockerfile: 'dockerfile',
+};
+function langForPath(path: string | undefined): string | undefined {
+  if (!path) return undefined;
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  const key = (base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : base).toLowerCase();
+  const lang = HL_EXT[key];
+  return lang && hljs.getLanguage(lang) ? lang : undefined;
+}
 
 function parseDiff(text: string): DiffRow[] {
   const rows: DiffRow[] = [];
   let oldNo = 0;
   let newNo = 0;
+  let curLang: string | undefined;
   for (const line of text.split('\n')) {
     if (line.startsWith('@@')) {
       const match = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (match) { oldNo = Number(match[1]); newNo = Number(match[2]); }
       rows.push({ type: 'hunk', text: line });
     } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('+++') || line.startsWith('---') || line.startsWith('new file') || line.startsWith('deleted file') || line.startsWith('old mode') || line.startsWith('new mode') || line.startsWith('similarity') || line.startsWith('rename ') || line.startsWith('\\')) {
+      if (line.startsWith('+++ b/')) curLang = langForPath(line.slice(6));
+      else if (line.startsWith('diff --git')) { const mm = /^diff --git a\/.+ b\/(.+)$/.exec(line); if (mm) curLang = langForPath(mm[1]); }
       rows.push({ type: 'meta', text: line });
     } else if (line.startsWith('+')) {
-      rows.push({ type: 'add', text: line, newNo });
+      rows.push({ type: 'add', text: line, newNo, lang: curLang });
       newNo++;
     } else if (line.startsWith('-')) {
-      rows.push({ type: 'del', text: line, oldNo });
+      rows.push({ type: 'del', text: line, oldNo, lang: curLang });
       oldNo++;
     } else {
-      rows.push({ type: 'ctx', text: line, oldNo, newNo });
+      rows.push({ type: 'ctx', text: line, oldNo, newNo, lang: curLang });
       oldNo++;
       newNo++;
     }
@@ -144,34 +174,24 @@ function parseDiff(text: string): DiffRow[] {
   return rows;
 }
 
-// Lightweight, dependency-free, per-line syntax highlighting for diffs. Tokenises
-// comments / strings / numbers / keywords (C-family + TS/JS/etc.) — good enough for
-// readable diffs without a grammar engine. Per line, so a string/comment spanning
-// multiple lines may mis-highlight an interior line; an acceptable trade-off.
-const SX_KEYWORDS = new Set(
-  ('const let var function return if else for while do switch case break continue class extends new this super ' +
-   'import export from as default async await yield try catch finally throw typeof instanceof in of void delete ' +
-   'null undefined true false interface type enum namespace public private protected readonly static abstract ' +
-   'implements get set keyof infer satisfies package func fn struct impl pub use mod match def lambda pass with ' +
-   'raise except elif and or not is None True False nil val fun when go defer chan select').split(' '));
-const SX_RE = /(\/\/.*|\/\*[\s\S]*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d[\w.]*)|([A-Za-z_$][\w$]*)/g;
-function highlightCode(code: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  let last = 0, key = 0, m: RegExpExecArray | null;
-  SX_RE.lastIndex = 0;
-  while ((m = SX_RE.exec(code))) {
-    if (m.index > last) out.push(code.slice(last, m.index));
-    const cls = m[1] ? 'sx-cmt' : m[2] ? 'sx-str' : m[3] ? 'sx-num' : (m[4] && SX_KEYWORDS.has(m[4])) ? 'sx-kw' : null;
-    out.push(cls ? <span key={key++} className={cls}>{m[0]}</span> : m[0]);
-    last = m.index + m[0].length;
+// Per-line syntax highlighting for diff rows via highlight.js (the `common`
+// language bundle, ~37 languages). Each line is highlighted independently using
+// the language derived from the file path, so a string/comment spanning multiple
+// lines may mis-highlight an interior line — an acceptable trade-off for
+// line-based diffs. hljs escapes the text it emits, so the HTML is safe to inject.
+function highlightCode(code: string, lang?: string): ReactNode {
+  if (!code || !lang) return code;
+  try {
+    return <span dangerouslySetInnerHTML={{ __html: hljs.highlight(code, { language: lang, ignoreIllegals: true }).value }} />;
+  } catch {
+    return code;
   }
-  if (last < code.length) out.push(code.slice(last));
-  return out;
 }
 
-function DiffView({ text }: { text: string }) {
+function DiffView({ text, path }: { text: string; path?: string }) {
+  const rows = useMemo(() => parseDiff(text), [text]);
+  const fallbackLang = useMemo(() => langForPath(path), [path]);
   if (!text.trim()) return <div className="empty">no textual changes</div>;
-  const rows = parseDiff(text);
   return (
     <div className="diff-table">
       {rows.map((row, i) => (
@@ -622,7 +642,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
         {selected ? (
           <>
             <div className="diff-head"><span className="fp">{selected}</span></div>
-            <DiffView text={diff?.fullDiff || diff?.diff || ''} />
+            <DiffView text={diff?.fullDiff || diff?.diff || ''} path={selected ?? undefined} />
           </>
         ) : <div className="empty">select a file to view its diff</div>}
       </div>
@@ -716,7 +736,7 @@ function HistoryView({ room, reloadKey }: { room: Room; reloadKey: number }) {
               })}
             </div>
             <div className="diff-head"><span className="fp">{file ?? ''}</span></div>
-            <DiffView text={diff} />
+            <DiffView text={diff} path={file ?? undefined} />
           </>
         ) : <div className="empty">{error ?? 'select a commit'}</div>}
       </div>

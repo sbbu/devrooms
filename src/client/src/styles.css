@@ -393,11 +393,15 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .dl .dpfx { color: var(--faint); }
 .dl.add .dpfx { color: var(--green); }
 .dl.del .dpfx { color: var(--red); }
-/* lightweight syntax highlighting (muted, from the theme palette) */
-.dc .sx-cmt { color: var(--faint); font-style: italic; }
-.dc .sx-str { color: var(--green); }
-.dc .sx-kw { color: var(--cyan); }
-.dc .sx-num { color: var(--yellow); }
+/* highlight.js tokens, mapped onto the muted theme palette (4 accents + greys) */
+.dc .hljs-comment, .dc .hljs-quote { color: var(--faint); font-style: italic; }
+.dc .hljs-string, .dc .hljs-regexp, .dc .hljs-addition, .dc .hljs-meta .hljs-string { color: var(--green); }
+.dc .hljs-keyword, .dc .hljs-built_in, .dc .hljs-type, .dc .hljs-literal, .dc .hljs-name, .dc .hljs-tag, .dc .hljs-selector-tag, .dc .hljs-section, .dc .hljs-doctag { color: var(--cyan); }
+.dc .hljs-number, .dc .hljs-symbol, .dc .hljs-bullet, .dc .hljs-link, .dc .hljs-attr, .dc .hljs-attribute, .dc .hljs-variable, .dc .hljs-template-variable, .dc .hljs-selector-attr, .dc .hljs-selector-pseudo, .dc .hljs-selector-id, .dc .hljs-selector-class { color: var(--yellow); }
+.dc .hljs-meta, .dc .hljs-punctuation, .dc .hljs-operator { color: var(--dim); }
+.dc .hljs-deletion { color: var(--red); }
+.dc .hljs-emphasis { font-style: italic; }
+.dc .hljs-strong { font-weight: 600; }
 .dl.hunk { background: color-mix(in srgb, var(--cyan) 9%, transparent); }
 .dl.hunk .dc, .dl.hunk .ln { color: var(--cyan); }
 .dl.meta .dc { color: var(--dim); }
