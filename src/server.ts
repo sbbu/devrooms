@@ -676,6 +676,45 @@ async function ensureCloneRemote(room: Room): Promise<void> {
   await run('git', ['remote', 'set-url', 'origin', upstream], room.path);
 }
 
+// .env files are gitignored, so a fresh clone never has them — which breaks apps
+// that need them. Find every .env / .env.* in the source working tree (skipping
+// dependency/build dirs) so they can be carried into the clone.
+const ENV_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'out', '.turbo', 'coverage', '.venv']);
+async function findEnvFiles(root: string): Promise<string[]> {
+  const found: string[] = [];
+  async function walk(dir: string, rel: string) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => null);
+    if (!entries) return;
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (ENV_SKIP_DIRS.has(entry.name)) continue;
+        await walk(path.join(dir, entry.name), rel ? `${rel}/${entry.name}` : entry.name);
+      } else if (entry.isFile() && (entry.name === '.env' || entry.name.startsWith('.env.'))) {
+        found.push(rel ? `${rel}/${entry.name}` : entry.name);
+      }
+    }
+  }
+  await walk(root, '');
+  return found;
+}
+
+// Copy the source's .env files into a freshly-cloned room, preserving relative
+// paths. Skips any that already exist in the clone (e.g. committed .env.example),
+// so it only fills in the gitignored ones the clone is missing. Best-effort.
+async function copyEnvFiles(srcRoot: string, destRoot: string): Promise<number> {
+  let copied = 0;
+  for (const rel of await findEnvFiles(srcRoot)) {
+    const dst = path.join(destRoot, rel);
+    try { await fs.access(dst); continue; } catch { /* missing in the clone — copy it */ }
+    try {
+      await fs.mkdir(path.dirname(dst), { recursive: true });
+      await fs.copyFile(path.join(srcRoot, rel), dst);
+      copied += 1;
+    } catch (error) { console.error(`devrooms: .env copy failed for ${rel}:`, error); }
+  }
+  return copied;
+}
+
 async function materializeRoom(project: Project, room: Room) {
   try {
     await fs.mkdir(path.dirname(room.path), { recursive: true });
@@ -691,6 +730,11 @@ async function materializeRoom(project: Project, room: Room) {
     // Record the branch git actually checked out (the repo default when none was
     // requested), so the room label and status reflect reality.
     room.branch = (await currentBranch(room).catch(() => undefined)) || room.branch;
+    // Carry over the source repo's gitignored .env files (the clone won't have them).
+    if (project.rootPath) {
+      const copied = await copyEnvFiles(project.rootPath, room.path).catch((error) => { console.error('devrooms: .env copy failed', error); return 0; });
+      if (copied) console.log(`devrooms: copied ${copied} .env file(s) into ${room.path}`);
+    }
     room.status = 'idle';
     room.updatedAt = now();
   } catch (error) {
