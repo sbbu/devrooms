@@ -1121,11 +1121,18 @@ async function deriveRoomLabel(room: Room): Promise<string | undefined> {
   return label;
 }
 
-// Rooms as sent to the client: the stored record plus a derived activity label.
+// Rooms as sent to the client: the stored record, but with the LIVE git branch plus a
+// derived activity label. The stored room.branch only gets written at clone time, so it
+// drifts the moment the branch changes any other way — a `git switch` in the terminal,
+// or a clone that lands on a different default than was asked for. A stale branch in the
+// UI is dangerous (it misled a push to the wrong branch once), so always report what git
+// actually has checked out, and derive the label from that too.
 async function roomViews(rooms: Room[]) {
   return Promise.all(rooms.map(async (room) => {
-    const label = await deriveRoomLabel(room).catch(() => undefined);
-    return label ? { ...room, label } : room;
+    const live = room.status === 'idle' ? await currentBranch(room).catch(() => undefined) : undefined;
+    const view = live && live !== room.branch ? { ...room, branch: live } : room;
+    const label = await deriveRoomLabel(view).catch(() => undefined);
+    return label ? { ...view, label } : view;
   }));
 }
 
