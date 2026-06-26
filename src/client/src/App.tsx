@@ -1057,6 +1057,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteCmd, setPaletteCmd] = useState<string | null>(null); // open the palette straight into this command
   const [, setThemeTick] = useState(0);
   const [activity, setActivity] = useState<Record<string, RoomActivity>>({});
   // When a room was last "seen" — attention older than this is acknowledged.
@@ -1221,10 +1222,10 @@ export function App() {
   }
 
   async function createRoom(name = roomName, branch = roomBranch) {
-    if (!selectedProject || !name.trim()) return;
+    if (!selectedProject) return; // name is optional — the server derives it from the branch / auto
     setBusy(true); setError(null);
     try {
-      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: name.trim(), branch: branch.trim() || undefined }) });
+      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: name.trim() || undefined, branch: branch.trim() || undefined }) });
       setSelectedRoomId(data.room.id);
       setShowNewRoom(false);
       await refresh();
@@ -1345,7 +1346,7 @@ export function App() {
       case 'Digit2': return hit(() => setTab('git'));
       case 'Digit3': return hit(() => setTab('subagents'));
       case 'KeyB': return hit(() => { if (shift) window.dispatchEvent(new Event('devrooms:branch-menu')); else toggleRail(); });
-      case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { if (miniRail && !forcedMini) expandRail(); setShowNewRoom(true); } });
+      case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { setPaletteCmd('new-room'); setPaletteOpen(true); } });
       case 'KeyT': if (!shift && selectedRoom?.status === 'idle' && terminalCount < 6) return hit(() => { setTab('terminal'); void addTerminal(); }); return;
       case 'KeyS': if (!shift && selectedRoom?.status === 'idle' && !git.merging) return hit(() => { void git.doOp(git.syncOp); }); return;
       case 'KeyW': {
@@ -1522,7 +1523,7 @@ export function App() {
         {meta && <span className="seg">up {formatUptime(meta.uptimeSeconds)}</span>}
       </div>
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+      <CommandPalette open={paletteOpen} initialCommand={paletteCmd} onClose={() => { setPaletteOpen(false); setPaletteCmd(null); }} commands={commands} />
     </div>
   );
 }

@@ -75,7 +75,7 @@ const APPEARANCES: { pref: Appearance; title: string; hint: string }[] = [
   { pref: 'dark', title: 'dark', hint: 'always use the dark theme' },
 ];
 
-export function CommandPalette({ open, onClose, commands }: { open: boolean; onClose: () => void; commands: Command[] }) {
+export function CommandPalette({ open, onClose, commands, initialCommand }: { open: boolean; onClose: () => void; commands: Command[]; initialCommand?: string | null }) {
   const [mode, setMode] = useState<PaletteMode>('root');
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
@@ -182,6 +182,16 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
 
   // Land the cursor in the first prompt field the moment the form appears.
   useEffect(() => { if (open && mode === 'prompt') fieldRefs.current[0]?.focus(); }, [open, mode, promptCmd]);
+
+  // Open straight into a given command (e.g. ⌘N → clone room): jump to its prompt,
+  // or run it if it has none. Resets to root on close via the open effect above.
+  useEffect(() => {
+    if (!open || !initialCommand) return;
+    const cmd = commands.find((c) => c.id === initialCommand);
+    if (cmd?.prompt) enterPrompt(cmd);
+    else if (cmd) { cmd.perform(); onClose(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialCommand]);
 
   if (!open) return null;
 
