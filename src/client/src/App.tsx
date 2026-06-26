@@ -6,7 +6,7 @@ import './styles.css';
 import { CommandPalette, type Command } from './CommandPalette';
 import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
-type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
+type Project = { id: string; name: string; repoUrl: string; rootPath?: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
@@ -1054,7 +1054,9 @@ export function App() {
   }
 
   const terminalCount = selectedRoom?.terminals?.length ?? 1;
-  const branchLabel = selectedRoom?.branch ?? selectedProject?.defaultBranch ?? '';
+  // A branch belongs to a room, not a project — only surface one when a room is
+  // selected, so a stale project default branch never shows in the status bar.
+  const branchLabel = selectedRoom?.branch ?? '';
 
   // App actions surfaced in the command palette (Theme + Appearance are added by
   // the palette itself). Rebuilt each render so the closures see current state.
@@ -1113,9 +1115,8 @@ export function App() {
                 const projectRooms = rooms.filter((room) => room.projectId === project.id);
                 return (
                   <Fragment key={project.id}>
-                    <button className={selectedProject?.id === project.id ? 'node project-node proj-active' : 'node project-node'} aria-label={`${project.name} · ${project.defaultBranch}`} title={`${project.name} · ${project.defaultBranch}`} onClick={() => setSelectedProjectId(project.id)}>
+                    <button className={selectedProject?.id === project.id ? 'node project-node proj-active' : 'node project-node'} aria-label={project.name} title={project.name} onClick={() => setSelectedProjectId(project.id)}>
                       <span className="pname">{project.name}</span>
-                      <span className="branch">{project.defaultBranch}</span>
                       <span className="mark" aria-hidden="true">{projectInitials(project.name)}</span>
                     </button>
                     {projectRooms.map((room, index) => {
@@ -1157,7 +1158,7 @@ export function App() {
             <div className="addform">
               <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
               <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
-              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />
+              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder="branch (repo default)" />
               <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={createRoom}>clone room</button>
             </div>
           )}
