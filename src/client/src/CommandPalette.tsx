@@ -23,6 +23,7 @@ export type Command = {
   hint?: string;
   keywords?: string;
   shortcut?: string;     // display-only key hint, e.g. "⌘1" / "Ctrl+R"
+  checked?: boolean;     // show the current-selection dot (e.g. the active room)
   // Selecting a command either runs it immediately or, when it declares a
   // `prompt`, opens an inline field form in the palette and runs perform() with
   // the collected values on submit.
@@ -135,7 +136,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     { key: '_theme', title: 'theme', hint: 'change the color theme', search: 'theme color colors palette appearance', run: enterTheme },
     { key: '_appearance', title: 'appearance', hint: `system · light · dark — now ${resolveMode()}`, search: 'appearance light dark mode system', run: enterAppearance },
     ...commands.map((cmd) => ({
-      key: cmd.id, title: cmd.title, hint: cmd.hint, keys: cmd.shortcut,
+      key: cmd.id, title: cmd.title, hint: cmd.hint, keys: cmd.shortcut, checked: cmd.checked,
       search: `${cmd.title} ${cmd.keywords ?? ''}`,
       run: () => { if (cmd.prompt) enterPrompt(cmd); else { cmd.perform(); onClose(); } },
     })),

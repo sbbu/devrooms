@@ -1281,6 +1281,18 @@ export function App() {
   if (selectedRoom) {
     commands.push({ id: 'delete-room', title: 'delete current room', hint: selectedRoom.name, keywords: 'remove destroy', shortcut: KDEL, perform: () => { void deleteSelectedRoom(); } });
   }
+  // Every room is searchable in the palette: ⌘P → type a room/project name → switch.
+  for (const room of rooms) {
+    const proj = projects.find((p) => p.id === room.projectId);
+    commands.push({
+      id: `switch-room:${room.id}`,
+      title: room.label ?? room.name,
+      hint: proj ? `${proj.name}${room.kind === 'main' ? ' · main' : ''}` : (room.kind === 'main' ? 'main' : 'room'),
+      keywords: `room go switch open ${room.name} ${room.label ?? ''} ${proj?.name ?? ''}`,
+      checked: room.id === selectedRoomId,
+      perform: () => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); },
+    });
+  }
 
   // Assign the global shortcut handler (mounted once above). ⌘ on macOS works even
   // with the terminal focused; Ctrl on win/linux is left alone inside text fields so
