@@ -10,6 +10,8 @@ type Project = { id: string; name: string; repoUrl: string; rootPath?: string; d
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
+type GitSummary = { behind: number; unpushed: number; conflict: boolean };
+type GitSummaries = Record<string, GitSummary>;
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
@@ -677,6 +679,7 @@ function GitPanel({ room }: { room: Room }) {
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
       setPushRejected(false);
       await refresh();
+      window.dispatchEvent(new Event('devrooms:git')); // nudge the sidebar icons to re-poll now
       setReloadKey((value) => value + 1); // re-fetch history so ↑ markers update
       return true;
     } catch (err) {
@@ -686,6 +689,7 @@ function GitPanel({ room }: { room: Room }) {
       // rather than parsing the error text — a conflicted `git pull` reports its fetch
       // summary on stderr and the "CONFLICT" lines on stdout, so the message alone lies.
       const next = await refresh();
+      window.dispatchEvent(new Event('devrooms:git')); // a failed op can still change state (e.g. conflict) — refresh icons
       if (next?.status.merging) {
         // The merge started but hit conflicts — switch straight to the resolve/commit UI.
         setPushRejected(false);
@@ -852,6 +856,7 @@ export function App() {
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [processCounts, setProcessCounts] = useState<ProcessCounts>({});
+  const [gitSummary, setGitSummary] = useState<GitSummaries>({});
   const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -917,7 +922,7 @@ export function App() {
     try { localStorage.setItem('devrooms.rail', 'full'); } catch { /* storage may be unavailable */ }
     setRailPref('full');
   }
-  const shortcutHint = /mac|darwin/i.test(window.devrooms?.platform ?? navigator.platform ?? '') ? '⌘B' : 'Ctrl+B';
+  const shortcutHint = /mac|darwin/i.test(window.devrooms?.platform ?? navigator.platform ?? '') ? '⌘b' : 'ctrl+b';
 
   async function refresh() {
     const [projectData, presetData, metaData] = await Promise.all([
@@ -979,6 +984,24 @@ export function App() {
 
   useEffect(() => { if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now(); }, [selectedRoomId]);
 
+  // Poll per-room git state for the sidebar icons (commits to pull/push, merge
+  // conflict). Sparse map — only rooms with something to show. "behind" reflects
+  // the last fetch; push/conflict are always live from local state.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const data = await api<{ summary: GitSummaries }>('/api/git/summary');
+        if (alive) setGitSummary(data.summary ?? {});
+      } catch { /* host may be momentarily unreachable */ }
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    // A git op in the panel fires this so the sidebar updates at once, not in ≤5s.
+    window.addEventListener('devrooms:git', poll);
+    return () => { alive = false; clearInterval(timer); window.removeEventListener('devrooms:git', poll); };
+  }, []);
+
   async function refreshRoomProcesses(roomId: string) {
     const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
     setRoomProcesses(data.processes);
@@ -1007,11 +1030,11 @@ export function App() {
     finally { setBusy(false); }
   }
 
-  async function createRoom() {
-    if (!selectedProject) return;
+  async function createRoom(name = roomName, branch = roomBranch) {
+    if (!selectedProject || !name.trim()) return;
     setBusy(true); setError(null);
     try {
-      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: roomName, branch: roomBranch || undefined }) });
+      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: name.trim(), branch: branch.trim() || undefined }) });
       setSelectedRoomId(data.room.id);
       setShowNewRoom(false);
       await refresh();
@@ -1059,18 +1082,30 @@ export function App() {
   // App actions surfaced in the command palette (Theme + Appearance are added by
   // the palette itself). Rebuilt each render so the closures see current state.
   const commands: Command[] = [
-    { id: 'go-terminal', title: 'Go to Terminal', hint: 'Show the terminal tab', keywords: 'terminal shell view', perform: () => setTab('terminal') },
-    { id: 'go-git', title: 'Go to Git', hint: 'Show the git tab', keywords: 'git diff changes commit', perform: () => setTab('git') },
-    { id: 'go-subagents', title: 'Go to Subagents', hint: 'Show the subagents tab', keywords: 'agents processes hermes claude codex', perform: () => setTab('subagents') },
-    { id: 'refresh', title: 'Refresh', hint: 'Reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
-    { id: 'new-room', title: 'New Room…', hint: 'Clone a room into this project', keywords: 'clone create', perform: () => setShowNewRoom((value) => !value) },
-    { id: 'new-project', title: 'New Project…', hint: 'Pick a local repo folder', keywords: 'folder repo open add', perform: () => { void pickProjectFolder(); } },
+    { id: 'go-terminal', title: 'go to terminal', hint: 'show the terminal tab', keywords: 'terminal shell view', perform: () => setTab('terminal') },
+    { id: 'go-git', title: 'go to git', hint: 'show the git tab', keywords: 'git diff changes commit', perform: () => setTab('git') },
+    { id: 'go-subagents', title: 'go to subagents', hint: 'show the subagents tab', keywords: 'agents processes hermes claude codex', perform: () => setTab('subagents') },
+    { id: 'refresh', title: 'refresh', hint: 'reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
+    {
+      id: 'new-room', title: 'clone room…',
+      hint: selectedProject ? `clone a room into ${selectedProject.name}` : 'clone a room into this project',
+      keywords: 'clone create new room',
+      prompt: {
+        title: 'clone room', submitLabel: 'clone room',
+        fields: [
+          { name: 'name', placeholder: 'room name' },
+          { name: 'branch', placeholder: `branch — defaults to ${selectedProject?.defaultBranch ?? 'project default'}`, optional: true },
+        ],
+      },
+      perform: (values) => { void createRoom(values?.name ?? '', values?.branch ?? ''); },
+    },
+    { id: 'new-project', title: 'new project…', hint: 'pick a local repo folder', keywords: 'folder repo open add', perform: () => { void pickProjectFolder(); } },
   ];
   if (selectedRoom?.status === 'idle' && terminalCount < 6) {
-    commands.splice(1, 0, { id: 'new-terminal', title: 'New Terminal', hint: 'Add a tiled terminal to this room', keywords: 'split pane add tiled', perform: () => { void addTerminal(); } });
+    commands.splice(1, 0, { id: 'new-terminal', title: 'new terminal', hint: 'add a tiled terminal to this room', keywords: 'split pane add tiled', perform: () => { void addTerminal(); } });
   }
   if (selectedRoom) {
-    commands.push({ id: 'delete-room', title: 'Delete Current Room', hint: selectedRoom.name, keywords: 'remove destroy', perform: () => { void deleteSelectedRoom(); } });
+    commands.push({ id: 'delete-room', title: 'delete current room', hint: selectedRoom.name, keywords: 'remove destroy', perform: () => { void deleteSelectedRoom(); } });
   }
 
   const activeTheme = resolveTheme(getConfig());
@@ -1089,7 +1124,7 @@ export function App() {
           <span className="name">devrooms</span>
         </span>
         <span className="meta">
-          <button className="palette-hint" onClick={() => setPaletteOpen(true)} title="Command palette">{window.devrooms?.platform === 'darwin' ? '⌘' : 'Ctrl'} P</button>
+          <button className="palette-hint" onClick={() => setPaletteOpen(true)} title="command palette">{window.devrooms?.platform === 'darwin' ? '⌘' : 'ctrl'} p</button>
           <span><span className={meta ? 'dot' : 'dot off'} />{meta ? 'daemon' : 'no daemon'}</span>
           {meta && <span className="ver">v{meta.version}</span>}
         </span>
@@ -1101,7 +1136,7 @@ export function App() {
             <button
               className="rail-toggle"
               disabled={forcedMini}
-              aria-label={miniRail ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label={miniRail ? 'expand sidebar' : 'collapse sidebar'}
               aria-expanded={!miniRail}
               title={forcedMini ? 'widen the window to pin the sidebar open' : miniRail ? `expand sidebar (${shortcutHint})` : `collapse sidebar (${shortcutHint})`}
               onClick={toggleRail}
@@ -1123,12 +1158,15 @@ export function App() {
                       const pc = processCounts[room.id];
                       const procLabel = compactProc(pc);
                       const mark = room.kind === 'main' ? room.name.charAt(0).toUpperCase() : room.name.charAt(0).toLowerCase();
+                      const gs = gitSummary[room.id];
+                      const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
+                      const label = `${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
                       return (
                         <button
                           key={room.id}
                           className={selectedRoom?.id === room.id ? 'node room-node row-sel' : 'node room-node'}
-                          aria-label={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
-                          title={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
+                          aria-label={label}
+                          title={label}
                           data-proc={pc?.running ? 'run' : pc?.lost ? 'lost' : undefined}
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
@@ -1137,6 +1175,13 @@ export function App() {
                             ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
                           <span className="rname">{room.name}</span>
+                          {gs && (gs.conflict || gs.behind > 0 || gs.unpushed > 0) && (
+                            <span className="gitstate" aria-hidden="true">
+                              {gs.conflict && <span className="gs-conflict" title="merge conflict">!</span>}
+                              {gs.behind > 0 && <span className="gs-pull" title={`${gs.behind} to pull`}>↓{gs.behind}</span>}
+                              {gs.unpushed > 0 && <span className="gs-push" title={`${gs.unpushed} to push`}>↑{gs.unpushed}</span>}
+                            </span>
+                          )}
                           <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
                           {procLabel && <span className="count2">{procLabel}</span>}
                           <span className="mark" aria-hidden="true">{mark}</span>
@@ -1158,7 +1203,7 @@ export function App() {
               <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
               <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
               <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />
-              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={createRoom}>clone room</button>
+              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={() => createRoom()}>clone room</button>
             </div>
           )}
         </aside>
@@ -1209,7 +1254,7 @@ export function App() {
         {branchLabel && <span className="seg">{branchLabel}</span>}
         <span className="seg">{'⏵'} {runningCount}/{roomProcesses.length} proc</span>
         <span className="spacer" />
-        <button className="seg theme-seg" onClick={() => setPaletteOpen(true)} title="Change theme (⌘P)"><span className="theme-chip" style={{ background: activeTheme.ui.cyan }} />{activeTheme.name}</button>
+        <button className="seg theme-seg" onClick={() => setPaletteOpen(true)} title="change theme (⌘p)"><span className="theme-chip" style={{ background: activeTheme.ui.cyan }} />{activeTheme.name.toLowerCase()}</button>
         {meta && <span className="seg">{meta.bindHost}:{meta.port}</span>}
         {meta && <span className="seg">up {formatUptime(meta.uptimeSeconds)}</span>}
       </div>
