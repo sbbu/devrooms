@@ -24,7 +24,6 @@ type Project = {
   name: string;
   repoUrl: string;
   rootPath?: string;
-  defaultBranch: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -323,7 +322,10 @@ function mainRoomId(projectId: string) {
   return `${projectId}-main`;
 }
 
-function upsertMainRoom(state: State, project: Project, rootPath: string, branch: string) {
+// The main room IS the picked working copy, so its branch is just whatever that
+// checkout currently has — read it live rather than storing a project-level one.
+async function upsertMainRoom(state: State, project: Project, rootPath: string) {
+  const branch = (await branchForPath(rootPath)) ?? 'main';
   const id = mainRoomId(project.id);
   const existing = state.rooms[id];
   if (
@@ -362,8 +364,7 @@ async function defaultLaunchProject() {
   const id = slugify(name);
   if (!id) return undefined;
   const repoUrl = process.env.DEVROOMS_PROJECT_REPO_URL?.trim() || rootPath;
-  const defaultBranch = process.env.DEVROOMS_PROJECT_BRANCH?.trim() || await branchForPath(rootPath) || await detectDefaultBranch(repoUrl) || 'main';
-  return { defaultBranch, id, name, repoUrl, rootPath };
+  return { id, name, repoUrl, rootPath };
 }
 
 async function ensureLaunchProject(state: State) {
@@ -376,13 +377,12 @@ async function ensureLaunchProject(state: State) {
     name: launch.name,
     repoUrl: launch.repoUrl,
     rootPath: launch.rootPath,
-    defaultBranch: launch.defaultBranch,
     createdAt: existing?.createdAt ?? stamp,
     updatedAt: existing?.updatedAt ?? stamp,
   };
-  const changedProject = !existing || existing.name !== project.name || existing.repoUrl !== project.repoUrl || existing.rootPath !== project.rootPath || existing.defaultBranch !== project.defaultBranch;
+  const changedProject = !existing || existing.name !== project.name || existing.repoUrl !== project.repoUrl || existing.rootPath !== project.rootPath;
   if (changedProject) state.projects[project.id] = project;
-  const changedRoom = upsertMainRoom(state, project, launch.rootPath, launch.defaultBranch);
+  const changedRoom = await upsertMainRoom(state, project, launch.rootPath);
   if (changedProject || changedRoom) await saveState(state);
   return state;
 }
@@ -550,24 +550,15 @@ function apiError(error: unknown, res: express.Response) {
   res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
 }
 
-async function detectDefaultBranch(repoUrl: string) {
-  const result = await run('git', ['ls-remote', '--symref', repoUrl, 'HEAD'], process.cwd(), { timeoutMs: 30_000 }).catch(() => undefined);
-  const match = result?.stdout.match(/ref: refs\/heads\/([^\t\n ]+)\s+HEAD/);
-  return match?.[1];
-}
-
-async function assertRepoReachable(repoUrl: string, defaultBranch: string) {
+async function assertRepoReachable(repoUrl: string) {
   let result: RunResult;
   try {
-    result = await run('git', ['ls-remote', '--heads', repoUrl, defaultBranch], process.cwd(), { timeoutMs: 30_000 });
+    result = await run('git', ['ls-remote', '--heads', repoUrl], process.cwd(), { timeoutMs: 30_000 });
   } catch (error) {
     throw new HttpError(400, `repository is not reachable: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (result.exitCode !== 0) {
     throw new HttpError(400, result.stderr || result.stdout || 'repository is not reachable');
-  }
-  if (!result.stdout.trim()) {
-    throw new HttpError(400, `default branch not found in repository: ${defaultBranch}`);
   }
 }
 
@@ -584,9 +575,7 @@ async function createProject(body: unknown) {
   const suppliedRepoUrl = typeof input.repoUrl === 'string' && input.repoUrl.trim() ? input.repoUrl.trim() : undefined;
   const repoUrl = suppliedRepoUrl ?? rootPath;
   if (!repoUrl) throw new HttpError(400, 'repoUrl is required unless rootPath is set');
-  const suppliedBranch = typeof input.defaultBranch === 'string' && input.defaultBranch.trim() ? input.defaultBranch.trim() : undefined;
-  const defaultBranch = suppliedBranch ?? (await detectDefaultBranch(repoUrl)) ?? (rootPath ? await branchForPath(rootPath) : undefined) ?? 'main';
-  await assertRepoReachable(repoUrl, defaultBranch);
+  await assertRepoReachable(repoUrl);
   const id = slugify(typeof input.id === 'string' && input.id.trim() ? input.id : name);
   if (!id) throw new HttpError(400, 'project id is empty after slugification');
 
@@ -598,12 +587,11 @@ async function createProject(body: unknown) {
     name,
     repoUrl,
     rootPath,
-    defaultBranch,
     createdAt: existing?.createdAt ?? stamp,
     updatedAt: stamp,
   };
   state.projects[id] = project;
-  if (rootPath) upsertMainRoom(state, project, rootPath, defaultBranch);
+  if (rootPath) await upsertMainRoom(state, project, rootPath);
   await saveState(state);
   return project;
 }
