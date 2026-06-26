@@ -24,7 +24,6 @@ type Project = {
   name: string;
   repoUrl: string;
   rootPath?: string;
-  defaultBranch: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -323,7 +322,10 @@ function mainRoomId(projectId: string) {
   return `${projectId}-main`;
 }
 
-function upsertMainRoom(state: State, project: Project, rootPath: string, branch: string) {
+// The main room IS the picked working copy, so its branch is just whatever that
+// checkout currently has — read it live rather than storing a project-level one.
+async function upsertMainRoom(state: State, project: Project, rootPath: string) {
+  const branch = (await branchForPath(rootPath)) ?? 'main';
   const id = mainRoomId(project.id);
   const existing = state.rooms[id];
   if (
@@ -362,8 +364,7 @@ async function defaultLaunchProject() {
   const id = slugify(name);
   if (!id) return undefined;
   const repoUrl = process.env.DEVROOMS_PROJECT_REPO_URL?.trim() || rootPath;
-  const defaultBranch = process.env.DEVROOMS_PROJECT_BRANCH?.trim() || await branchForPath(rootPath) || await detectDefaultBranch(repoUrl) || 'main';
-  return { defaultBranch, id, name, repoUrl, rootPath };
+  return { id, name, repoUrl, rootPath };
 }
 
 async function ensureLaunchProject(state: State) {
@@ -376,13 +377,12 @@ async function ensureLaunchProject(state: State) {
     name: launch.name,
     repoUrl: launch.repoUrl,
     rootPath: launch.rootPath,
-    defaultBranch: launch.defaultBranch,
     createdAt: existing?.createdAt ?? stamp,
     updatedAt: existing?.updatedAt ?? stamp,
   };
-  const changedProject = !existing || existing.name !== project.name || existing.repoUrl !== project.repoUrl || existing.rootPath !== project.rootPath || existing.defaultBranch !== project.defaultBranch;
+  const changedProject = !existing || existing.name !== project.name || existing.repoUrl !== project.repoUrl || existing.rootPath !== project.rootPath;
   if (changedProject) state.projects[project.id] = project;
-  const changedRoom = upsertMainRoom(state, project, launch.rootPath, launch.defaultBranch);
+  const changedRoom = await upsertMainRoom(state, project, launch.rootPath);
   if (changedProject || changedRoom) await saveState(state);
   return state;
 }
@@ -550,24 +550,15 @@ function apiError(error: unknown, res: express.Response) {
   res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
 }
 
-async function detectDefaultBranch(repoUrl: string) {
-  const result = await run('git', ['ls-remote', '--symref', repoUrl, 'HEAD'], process.cwd(), { timeoutMs: 30_000 }).catch(() => undefined);
-  const match = result?.stdout.match(/ref: refs\/heads\/([^\t\n ]+)\s+HEAD/);
-  return match?.[1];
-}
-
-async function assertRepoReachable(repoUrl: string, defaultBranch: string) {
+async function assertRepoReachable(repoUrl: string) {
   let result: RunResult;
   try {
-    result = await run('git', ['ls-remote', '--heads', repoUrl, defaultBranch], process.cwd(), { timeoutMs: 30_000 });
+    result = await run('git', ['ls-remote', '--heads', repoUrl], process.cwd(), { timeoutMs: 30_000 });
   } catch (error) {
     throw new HttpError(400, `repository is not reachable: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (result.exitCode !== 0) {
     throw new HttpError(400, result.stderr || result.stdout || 'repository is not reachable');
-  }
-  if (!result.stdout.trim()) {
-    throw new HttpError(400, `default branch not found in repository: ${defaultBranch}`);
   }
 }
 
@@ -584,9 +575,7 @@ async function createProject(body: unknown) {
   const suppliedRepoUrl = typeof input.repoUrl === 'string' && input.repoUrl.trim() ? input.repoUrl.trim() : undefined;
   const repoUrl = suppliedRepoUrl ?? rootPath;
   if (!repoUrl) throw new HttpError(400, 'repoUrl is required unless rootPath is set');
-  const suppliedBranch = typeof input.defaultBranch === 'string' && input.defaultBranch.trim() ? input.defaultBranch.trim() : undefined;
-  const defaultBranch = suppliedBranch ?? (await detectDefaultBranch(repoUrl)) ?? (rootPath ? await branchForPath(rootPath) : undefined) ?? 'main';
-  await assertRepoReachable(repoUrl, defaultBranch);
+  await assertRepoReachable(repoUrl);
   const id = slugify(typeof input.id === 'string' && input.id.trim() ? input.id : name);
   if (!id) throw new HttpError(400, 'project id is empty after slugification');
 
@@ -598,12 +587,11 @@ async function createProject(body: unknown) {
     name,
     repoUrl,
     rootPath,
-    defaultBranch,
     createdAt: existing?.createdAt ?? stamp,
     updatedAt: stamp,
   };
   state.projects[id] = project;
-  if (rootPath) upsertMainRoom(state, project, rootPath, defaultBranch);
+  if (rootPath) await upsertMainRoom(state, project, rootPath);
   await saveState(state);
   return project;
 }
@@ -799,7 +787,11 @@ type ClaudeHookEntry = { matcher?: string; hooks: Array<{ type: string; command:
 type ClaudeSettings = { hooks?: Record<string, ClaudeHookEntry[]> } & Record<string, unknown>;
 
 function statusHookCommand(state: string) {
-  return `printf '\\033]9279;${state}\\033\\\\' >/dev/tty 2>/dev/null`;
+  // Redirect stderr BEFORE stdout: if there is no controlling terminal, opening
+  // /dev/tty fails, and with `2>/dev/null` already in effect that error is
+  // swallowed instead of leaking as "/dev/tty: Device not configured". `|| true`
+  // keeps the hook's exit status 0 so Claude Code never flags a failed hook.
+  return `printf '\\033]9279;${state}\\033\\\\' 2>/dev/null >/dev/tty || true`;
 }
 
 async function installClaudeStatusHooks(room: Room) {
@@ -817,8 +809,19 @@ async function installClaudeStatusHooks(room: Room) {
   let changed = false;
   for (const [event, state] of events) {
     const list = hooks[event] ?? (hooks[event] = []);
-    if (JSON.stringify(list).includes('9279')) continue; // ours already present
-    list.push({ matcher: '*', hooks: [{ type: 'command', command: statusHookCommand(state) }] });
+    const command = statusHookCommand(state);
+    // Find a previously-installed devrooms hook by its 9279 marker. If present but
+    // using an older command form, heal it in place; otherwise install fresh. This
+    // upgrades existing rooms instead of leaving stale (e.g. /dev/tty-erroring) hooks.
+    const ours = list.find((entry) => entry.hooks?.some((h) => h.command?.includes('9279')));
+    if (ours) {
+      if (ours.hooks.length === 1 && ours.hooks[0]?.command === command) continue; // already current
+      ours.matcher = '*';
+      ours.hooks = [{ type: 'command', command }];
+      changed = true;
+      continue;
+    }
+    list.push({ matcher: '*', hooks: [{ type: 'command', command }] });
     changed = true;
   }
   if (!changed) return;
@@ -1025,11 +1028,29 @@ async function gitRoomLabel(room: Room, base?: string): Promise<string | undefin
   return undefined;
 }
 
-async function deriveRoomLabel(room: Room, project: Project | undefined): Promise<string | undefined> {
+// The repo's default branch, read from origin/HEAD (set by git clone). It doesn't
+// change during a session, so cache it long enough to keep the projects poll cheap.
+const DEFAULT_BRANCH_TTL_MS = 60_000;
+const defaultBranchCache = new Map<string, { at: number; branch: string | undefined }>();
+
+async function roomBaseBranch(room: Room): Promise<string | undefined> {
+  const cached = defaultBranchCache.get(room.id);
+  if (cached && Date.now() - cached.at < DEFAULT_BRANCH_TTL_MS) return cached.branch;
+  const result = await run('git', ['rev-parse', '--abbrev-ref', 'origin/HEAD'], room.path, { timeoutMs: 5_000 }).catch(() => undefined);
+  const ref = result?.exitCode === 0 ? result.stdout.trim() : '';
+  const branch = ref && ref !== 'origin/HEAD' ? ref.replace(/^origin\//, '') : undefined;
+  defaultBranchCache.set(room.id, { at: Date.now(), branch });
+  return branch;
+}
+
+async function deriveRoomLabel(room: Room): Promise<string | undefined> {
   // The main room is the repo itself — its name ("main") is already its identity.
   if (room.kind === 'main') return undefined;
-  const base = project?.defaultBranch;
-  if (room.branch && base && room.branch !== base) {
+  const base = await roomBaseBranch(room);
+  // A branch that isn't the repo default is the user's own task label. Fall back to
+  // the usual default names if origin/HEAD couldn't be read.
+  const onDefault = base ? room.branch === base : room.branch === 'main' || room.branch === 'master';
+  if (room.branch && !onDefault) {
     const label = deslugBranch(room.branch);
     if (label) return label;
   }
@@ -1043,11 +1064,25 @@ async function deriveRoomLabel(room: Room, project: Project | undefined): Promis
 }
 
 // Rooms as sent to the client: the stored record plus a derived activity label.
-async function roomViews(state: State, rooms: Room[]) {
+async function roomViews(rooms: Room[]) {
   return Promise.all(rooms.map(async (room) => {
-    const label = await deriveRoomLabel(room, state.projects[room.projectId]).catch(() => undefined);
+    const label = await deriveRoomLabel(room).catch(() => undefined);
     return label ? { ...room, label } : room;
   }));
+}
+
+// Lightweight per-room git signal for the sidebar: commits to pull (behind, vs
+// the last-fetched origin ref), commits to push (local commits no origin ref
+// holds — correct even without an upstream), and whether a merge left unmerged
+// paths. Two cheap reads per room; any failure (not a repo, wedged, timeout)
+// yields null so that room just shows no icons — the poller must never 500.
+async function gitRoomSignal(room: Room): Promise<{ behind: number; unpushed: number; conflict: boolean } | null> {
+  const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path, { timeoutMs: 5000 });
+  if (status.exitCode !== 0) return null;
+  const parsed = parseStatus(status.stdout);
+  const unpushed = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path, { timeoutMs: 5000 }).catch(() => ({ stdout: '' }));
+  const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
+  return { behind: parsed.behind, unpushed: unpushedCount, conflict: parsed.files.some((file) => file.unmerged) };
 }
 
 function metaSummary(state: State) {
@@ -1278,7 +1313,24 @@ async function main() {
 
   app.get('/api/projects', async (_req, res) => {
     const state = await getState();
-    res.json({ projects: Object.values(state.projects), rooms: await roomViews(state, Object.values(state.rooms)), processCounts: processCountsByRoom(state) });
+    res.json({ projects: Object.values(state.projects), rooms: await roomViews(Object.values(state.rooms)), processCounts: processCountsByRoom(state) });
+  });
+
+  // Per-room git signal for the sidebar (pull/push/conflict icons). Probed on its
+  // own poll so a slow git call never holds up the project list. Sparse map: only
+  // rooms with something to show appear (like processCounts). Never throws.
+  app.get('/api/git/summary', async (_req, res) => {
+    const state = await getState();
+    const summary: Record<string, { behind: number; unpushed: number; conflict: boolean }> = {};
+    await Promise.all(Object.values(state.rooms)
+      .filter((room) => room.status === 'idle') // skip creating/errored/half-materialized rooms
+      .map(async (room) => {
+        try {
+          const sig = await gitRoomSignal(room);
+          if (sig && (sig.behind > 0 || sig.unpushed > 0 || sig.conflict)) summary[room.id] = sig;
+        } catch { /* not a repo / wedged — no signal for this room */ }
+      }));
+    res.json({ summary });
   });
 
   app.post('/api/projects', async (req, res) => {
@@ -1293,7 +1345,7 @@ async function main() {
     try {
       const state = await getState();
       getProject(state, req.params.projectId);
-      res.json({ rooms: await roomViews(state, Object.values(state.rooms).filter((room) => room.projectId === req.params.projectId)) });
+      res.json({ rooms: await roomViews(Object.values(state.rooms).filter((room) => room.projectId === req.params.projectId)) });
     } catch (error) {
       apiError(error, res);
     }

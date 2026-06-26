@@ -6,10 +6,12 @@ import './styles.css';
 import { CommandPalette, type Command } from './CommandPalette';
 import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
-type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
+type Project = { id: string; name: string; repoUrl: string; rootPath?: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[]; label?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
+type GitSummary = { behind: number; unpushed: number; conflict: boolean };
+type GitSummaries = Record<string, GitSummary>;
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
@@ -662,7 +664,16 @@ function GitPanel({ room }: { room: Room }) {
     try { const next = await api<GitStatus>(`/api/rooms/${room.id}/git/status`); setStatus(next); setError(null); return next; }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); return null; }
   }
-  useEffect(() => { setPushRejected(false); refresh(); }, [room.id]);
+  // On opening the git tab (GitPanel mounts fresh each time) or switching rooms,
+  // pick the default view from the freshly-fetched status: history when there's
+  // nothing to manage — no uncommitted changes and no merge in progress — else
+  // changes. Only runs on room change/mount, so manual tab switches stick.
+  useEffect(() => {
+    setPushRejected(false);
+    refresh().then((next) => {
+      if (next) setView(next.status.files.length === 0 && !next.status.merging ? 'history' : 'changes');
+    });
+  }, [room.id]);
   useEffect(() => {
     const onFocus = () => { refresh(); };
     window.addEventListener('focus', onFocus);
@@ -677,6 +688,7 @@ function GitPanel({ room }: { room: Room }) {
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
       setPushRejected(false);
       await refresh();
+      window.dispatchEvent(new Event('devrooms:git')); // nudge the sidebar icons to re-poll now
       setReloadKey((value) => value + 1); // re-fetch history so ↑ markers update
       return true;
     } catch (err) {
@@ -686,6 +698,7 @@ function GitPanel({ room }: { room: Room }) {
       // rather than parsing the error text — a conflicted `git pull` reports its fetch
       // summary on stderr and the "CONFLICT" lines on stdout, so the message alone lies.
       const next = await refresh();
+      window.dispatchEvent(new Event('devrooms:git')); // a failed op can still change state (e.g. conflict) — refresh icons
       if (next?.status.merging) {
         // The merge started but hit conflicts — switch straight to the resolve/commit UI.
         setPushRejected(false);
@@ -852,6 +865,7 @@ export function App() {
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [processCounts, setProcessCounts] = useState<ProcessCounts>({});
+  const [gitSummary, setGitSummary] = useState<GitSummaries>({});
   const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -979,6 +993,24 @@ export function App() {
 
   useEffect(() => { if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now(); }, [selectedRoomId]);
 
+  // Poll per-room git state for the sidebar icons (commits to pull/push, merge
+  // conflict). Sparse map — only rooms with something to show. "behind" reflects
+  // the last fetch; push/conflict are always live from local state.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const data = await api<{ summary: GitSummaries }>('/api/git/summary');
+        if (alive) setGitSummary(data.summary ?? {});
+      } catch { /* host may be momentarily unreachable */ }
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    // A git op in the panel fires this so the sidebar updates at once, not in ≤5s.
+    window.addEventListener('devrooms:git', poll);
+    return () => { alive = false; clearInterval(timer); window.removeEventListener('devrooms:git', poll); };
+  }, []);
+
   async function refreshRoomProcesses(roomId: string) {
     const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
     setRoomProcesses(data.processes);
@@ -1054,7 +1086,9 @@ export function App() {
   }
 
   const terminalCount = selectedRoom?.terminals?.length ?? 1;
-  const branchLabel = selectedRoom?.branch ?? selectedProject?.defaultBranch ?? '';
+  // A branch belongs to a room, not a project — only surface one when a room is
+  // selected, so a stale project default branch never shows in the status bar.
+  const branchLabel = selectedRoom?.branch ?? '';
 
   // App actions surfaced in the command palette (Theme + Appearance are added by
   // the palette itself). Rebuilt each render so the closures see current state.
@@ -1071,7 +1105,7 @@ export function App() {
         title: 'clone room', submitLabel: 'clone room',
         fields: [
           { name: 'name', placeholder: 'room name' },
-          { name: 'branch', placeholder: `branch — defaults to ${selectedProject?.defaultBranch ?? 'project default'}`, optional: true },
+          { name: 'branch', placeholder: 'branch — defaults to repo default', optional: true },
         ],
       },
       perform: (values) => { void createRoom(values?.name ?? '', values?.branch ?? ''); },
@@ -1125,9 +1159,8 @@ export function App() {
                 const projectRooms = rooms.filter((room) => room.projectId === project.id);
                 return (
                   <Fragment key={project.id}>
-                    <button className={selectedProject?.id === project.id ? 'node project-node proj-active' : 'node project-node'} aria-label={`${project.name} · ${project.defaultBranch}`} title={`${project.name} · ${project.defaultBranch}`} onClick={() => setSelectedProjectId(project.id)}>
+                    <button className={selectedProject?.id === project.id ? 'node project-node proj-active' : 'node project-node'} aria-label={project.name} title={project.name} onClick={() => setSelectedProjectId(project.id)}>
                       <span className="pname">{project.name}</span>
-                      <span className="branch">{project.defaultBranch}</span>
                       <span className="mark" aria-hidden="true">{projectInitials(project.name)}</span>
                     </button>
                     {projectRooms.map((room, index) => {
@@ -1138,7 +1171,9 @@ export function App() {
                       // Lead with the derived activity label; the typed name stays the
                       // stable handle (shown muted alongside, and in the tooltip).
                       const display = room.label ?? room.name;
-                      const meta = `${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`;
+                      const gs = gitSummary[room.id];
+                      const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
+                      const meta = `${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
                       return (
                         <button
                           key={room.id}
@@ -1154,6 +1189,13 @@ export function App() {
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
                           <span className="rname">{display}</span>
                           {room.label && <span className="rhandle">{room.name}</span>}
+                          {gs && (gs.conflict || gs.behind > 0 || gs.unpushed > 0) && (
+                            <span className="gitstate" aria-hidden="true">
+                              {gs.conflict && <span className="gs-conflict" title="merge conflict">!</span>}
+                              {gs.behind > 0 && <span className="gs-pull" title={`${gs.behind} to pull`}>↓{gs.behind}</span>}
+                              {gs.unpushed > 0 && <span className="gs-push" title={`${gs.unpushed} to push`}>↑{gs.unpushed}</span>}
+                            </span>
+                          )}
                           <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
                           {procLabel && <span className="count2">{procLabel}</span>}
                           <span className="mark" aria-hidden="true">{mark}</span>
@@ -1174,7 +1216,7 @@ export function App() {
             <div className="addform">
               <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
               <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
-              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />
+              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder="branch (repo default)" />
               <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={() => createRoom()}>clone room</button>
             </div>
           )}
