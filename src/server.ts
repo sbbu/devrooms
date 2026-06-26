@@ -436,8 +436,25 @@ async function hasConflictMarkers(absPath: string): Promise<boolean> {
 }
 
 async function listBranches(room: Room) {
-  const result = await runGit(room, ['branch', '--format=%(refname:short)']);
-  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  // Include remote-tracking branches, not just local ones: a fresh clone has a
+  // single local branch, so without the origin/* refs the branch picker would
+  // only ever offer that one branch. Checking out a bare "main" that exists only
+  // as origin/main makes git auto-create a local tracking branch (DWIM). Use full
+  // refnames (not :short, which collapses refs/remotes/origin/HEAD to "origin").
+  const result = await runGit(room, ['branch', '-a', '--format=%(refname)']);
+  const seen = new Set<string>();
+  const branches: string[] = [];
+  for (const ref of result.stdout.split('\n').map((line) => line.trim()).filter(Boolean)) {
+    if (ref.endsWith('/HEAD')) continue; // skip symbolic refs like origin/HEAD
+    let name: string;
+    if (ref.startsWith('refs/heads/')) name = ref.slice('refs/heads/'.length);
+    else if (ref.startsWith('refs/remotes/origin/')) name = ref.slice('refs/remotes/origin/'.length);
+    else continue; // skip non-origin remotes (checking them out would detach HEAD)
+    if (seen.has(name)) continue; // local branch already covers this name
+    seen.add(name);
+    branches.push(name);
+  }
+  return branches;
 }
 
 async function currentBranch(room: Room) {
@@ -603,7 +620,10 @@ async function createRoom(projectId: string, body: unknown) {
     name,
     path: roomPath,
     kind: 'clone',
-    branch: branch ?? project.defaultBranch,
+    // No explicit branch => clone the repo's default branch (origin/HEAD, i.e.
+    // main/master) rather than whatever branch the project happened to launch on.
+    // The actual branch is recorded after the clone, in materializeRoom.
+    branch,
     status: 'creating',
     createdAt: stamp,
     updatedAt: stamp,
@@ -663,6 +683,9 @@ async function materializeRoom(project: Project, room: Room) {
     // Folder-picked projects clone from a local path; point origin at the real remote.
     await ensureCloneRemote(room).catch((error) => console.error('clone remote repoint failed', error));
     await run('git', ['fetch', 'origin', '--prune'], room.path).catch(() => { /* offline: keep local refs */ });
+    // Record the branch git actually checked out (the repo default when none was
+    // requested), so the room label and status reflect reality.
+    room.branch = (await currentBranch(room).catch(() => undefined)) || room.branch;
     room.status = 'idle';
     room.updatedAt = now();
   } catch (error) {
