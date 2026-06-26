@@ -73,8 +73,8 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 940,
-    minWidth: 980,
-    minHeight: 680,
+    minWidth: 480,
+    minHeight: 360,
     title: 'devrooms',
     frame: false,
     backgroundColor: '#16181d',
