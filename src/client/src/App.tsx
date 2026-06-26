@@ -7,7 +7,7 @@ import { CommandPalette, type Command } from './CommandPalette';
 import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string };
-type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
+type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[]; label?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
 type GitSummary = { behind: number; unpushed: number; dirty: number; conflict: boolean };
@@ -1210,15 +1210,18 @@ export function App() {
                       const pc = processCounts[room.id];
                       const procLabel = compactProc(pc);
                       const mark = room.kind === 'main' ? room.name.charAt(0).toUpperCase() : room.name.charAt(0).toLowerCase();
+                      // Lead with the derived activity label; the typed name stays the
+                      // stable handle (shown muted alongside, and in the tooltip).
+                      const display = room.label ?? room.name;
                       const gs = gitSummary[room.id];
                       const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.dirty ? `${gs.dirty} uncommitted` : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
-                      const label = `${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
+                      const meta = `${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
                       return (
                         <button
                           key={room.id}
                           className={selectedRoom?.id === room.id ? 'node room-node row-sel' : 'node room-node'}
-                          aria-label={label}
-                          title={label}
+                          aria-label={`${display}${room.label ? ` (${room.name})` : ''} · ${meta}`}
+                          title={`${display}${room.label ? ` (${room.name})` : ''} · ${meta}`}
                           data-proc={pc?.running ? 'run' : pc?.lost ? 'lost' : undefined}
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
@@ -1226,7 +1229,8 @@ export function App() {
                           {room.status === 'idle'
                             ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
-                          <span className="rname">{room.name}</span>
+                          <span className="rname">{display}</span>
+                          {room.label && <span className="rhandle">{room.name}</span>}
                           {gs && (gs.conflict || gs.dirty > 0 || gs.behind > 0 || gs.unpushed > 0) && (
                             <span className="gitstate" aria-hidden="true">
                               {gs.conflict && <span className="gs-conflict" title="merge conflict">!</span>}
@@ -1264,7 +1268,7 @@ export function App() {
         <section className="ws">
           <div className="ws-head">
             <div className="ws-title">
-              <span className="rname">{selectedRoom ? selectedRoom.name : 'no room selected'}</span>
+              <span className="rname">{selectedRoom ? (selectedRoom.label ?? selectedRoom.name) : 'no room selected'}</span>
               <span className="rpath">{selectedRoom ? shortPath(selectedRoom.path) : 'create a project or clone a room to begin'}</span>
             </div>
             <div className="tabs">
