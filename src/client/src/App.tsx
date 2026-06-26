@@ -664,7 +664,16 @@ function GitPanel({ room }: { room: Room }) {
     try { const next = await api<GitStatus>(`/api/rooms/${room.id}/git/status`); setStatus(next); setError(null); return next; }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); return null; }
   }
-  useEffect(() => { setPushRejected(false); refresh(); }, [room.id]);
+  // On opening the git tab (GitPanel mounts fresh each time) or switching rooms,
+  // pick the default view from the freshly-fetched status: history when there's
+  // nothing to manage — no uncommitted changes and no merge in progress — else
+  // changes. Only runs on room change/mount, so manual tab switches stick.
+  useEffect(() => {
+    setPushRejected(false);
+    refresh().then((next) => {
+      if (next) setView(next.status.files.length === 0 && !next.status.merging ? 'history' : 'changes');
+    });
+  }, [room.id]);
   useEffect(() => {
     const onFocus = () => { refresh(); };
     window.addEventListener('focus', onFocus);
