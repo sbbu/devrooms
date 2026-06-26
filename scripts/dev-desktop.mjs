@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { killStaleDaemon, killStaleVite, killStaleElectron, waitPortFree } from './lib-cleanup.mjs';
+import { killStaleDaemon, killStaleVite, killStaleElectron, killByPort, waitPortFree } from './lib-cleanup.mjs';
 
 const bin = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const root = process.cwd();
@@ -66,9 +66,15 @@ console.log('[devrooms] cleaning up any previous instance...');
 killStaleDaemon(root, port);
 killStaleVite();
 killStaleElectron(root);
-// NOTE: the pty-host (port + 1) is deliberately NOT killed — it's reused so
-// terminal sessions survive a relaunch. `pnpm stop` ends it on purpose.
+// Also restart the pty-host (port + 1) on an explicit relaunch. Reusing a persisted
+// host across the renderer's reconnect left it in a stale runtime state that broke
+// terminal input/paste until a manual `pnpm stop` — so a full relaunch now always
+// starts it fresh. Sessions still survive the frequent tsx-watch daemon restarts
+// during editing (those don't re-run this script); only an explicit relaunch resets
+// them — which is exactly when you want a clean slate.
+killByPort(port + 1);
 await waitPortFree(port);
+await waitPortFree(port + 1);
 
 console.log('[devrooms] compiling Electron main once...');
 const tscOnce = spawnSync(bin('tsc'), ['-p', 'tsconfig.electron.json'], { cwd: root, env: baseEnv, stdio: 'inherit' });

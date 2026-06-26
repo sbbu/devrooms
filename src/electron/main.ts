@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
 import path from 'node:path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +54,13 @@ async function waitForDaemon() {
 async function ensureDaemon() {
   if (await isHealthy()) return;
   if (shouldUseExternalServer) throw new Error(`External devrooms server is not reachable: ${serverUrl}`);
+
+  // Fresh app launch: end any pty-host left over from a previous run (port + 1) so the
+  // daemon spawns a clean one. Reusing a persisted host across the renderer reconnect
+  // comes up with stale terminal state that breaks input/paste; a fresh host avoids it.
+  if (process.platform !== 'win32') {
+    try { spawnSync('sh', ['-c', `lsof -ti tcp:${port + 1} | xargs kill -9`], { stdio: 'ignore', timeout: 3000 }); } catch { /* best effort */ }
+  }
 
   const serverEntry = path.resolve(__dirname, '../server.js');
   daemon = spawn(process.execPath, [serverEntry], {
@@ -138,7 +145,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   if (daemon && !daemon.killed) daemon.kill('SIGTERM');
-  // The detached pty-host is left running ON PURPOSE so terminal sessions
-  // survive a quit — reopening devrooms reattaches to the live PTYs. To end
-  // sessions deliberately, run `pnpm stop` (dev) or kill the host's port.
+  // The detached pty-host is left running across a quit, but the NEXT launch starts
+  // it fresh (see ensureDaemon) — reattaching a reused host to a relaunched renderer
+  // left terminal input/paste broken, so we trade session-survival for a clean,
+  // working terminal on every launch.
 });
