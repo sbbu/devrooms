@@ -763,42 +763,50 @@ function GitBar({ git }: { git: GitRoom }) {
   const [newBranch, setNewBranch] = useState('');
   const { branch, otherBranches, merging, conflicts, syncing, syncOp, syncLabel, syncTitle, behind, unpushed, doOp, gitOp } = git;
   return (
-    <>
-      <div className="cmdrow">
-        {merging ? (
-          <span className="mergebar">
-            <span className="merge-state">{conflicts > 0 ? `merging — ${conflicts} conflict${conflicts === 1 ? '' : 's'}` : 'merging — resolved'}</span>
-            <button className="merge-commit" disabled={syncing || conflicts > 0} title="conclude the merge (git commit --no-edit)" onClick={() => doOp('merge-continue')}>commit merge</button>
-            <button className="merge-abort" disabled={syncing} title="discard the merge (git merge --abort)" onClick={() => doOp('merge-abort')}>abort</button>
-          </span>
-        ) : (
-          <button className="sync" disabled={syncing} onClick={() => doOp(syncOp)} title={syncTitle}>
-            <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
-            {!syncing && (behind > 0 || unpushed > 0) && (
-              <span className="sync-counts">
-                {behind > 0 && <span className="dn">↓{behind}</span>}
-                {unpushed > 0 && <span className="up">↑{unpushed}</span>}
-              </span>
-            )}
-          </button>
-        )}
-        <span className="branch-sel">
-          <span className="lbl">branch</span>
-          <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
-            {(git.status?.branches ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
-          </select>
-          {!merging && otherBranches.length > 0 && (
-            // Action menu: stays on "merge…"; picking a branch merges it into the current one.
-            <select className="merge-sel" value="" disabled={syncing} title={`merge another branch into ${branch}`}
-              onChange={(event) => { const src = event.target.value; if (src && window.confirm(`merge ${src} into ${branch}?`)) gitOp('merge', { branch: src }); }}>
-              <option value="" disabled>merge…</option>
-              {otherBranches.map((name) => <option key={name} value={name}>{name}</option>)}
-            </select>
-          )}
-          <input className="nb" value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="new branch" />
-          <button disabled={!newBranch.trim()} onClick={() => gitOp('checkout-new', { branch: newBranch.trim() }).then((ok) => { if (ok) setNewBranch(''); })}>create</button>
+    <span className="headgit">
+      {merging ? (
+        <span className="mergebar">
+          <span className="merge-state">{conflicts > 0 ? `merging — ${conflicts} conflict${conflicts === 1 ? '' : 's'}` : 'merging — resolved'}</span>
+          <button className="merge-commit" disabled={syncing || conflicts > 0} title="conclude the merge (git commit --no-edit)" onClick={() => doOp('merge-continue')}>commit merge</button>
+          <button className="merge-abort" disabled={syncing} title="discard the merge (git merge --abort)" onClick={() => doOp('merge-abort')}>abort</button>
         </span>
-      </div>
+      ) : (
+        <button className="sync" disabled={syncing} onClick={() => doOp(syncOp)} title={syncTitle}>
+          <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
+          {!syncing && (behind > 0 || unpushed > 0) && (
+            <span className="sync-counts">
+              {behind > 0 && <span className="dn">↓{behind}</span>}
+              {unpushed > 0 && <span className="up">↑{unpushed}</span>}
+            </span>
+          )}
+        </button>
+      )}
+      <span className="branch-sel">
+        <span className="lbl">branch</span>
+        <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
+          {(git.status?.branches ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+        {!merging && otherBranches.length > 0 && (
+          // Action menu: stays on "merge…"; picking a branch merges it into the current one.
+          <select className="merge-sel" value="" disabled={syncing} title={`merge another branch into ${branch}`}
+            onChange={(event) => { const src = event.target.value; if (src && window.confirm(`merge ${src} into ${branch}?`)) gitOp('merge', { branch: src }); }}>
+            <option value="" disabled>merge…</option>
+            {otherBranches.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        )}
+        <input className="nb" value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="new branch" />
+        <button disabled={!newBranch.trim()} onClick={() => gitOp('checkout-new', { branch: newBranch.trim() }).then((ok) => { if (ok) setNewBranch(''); })}>create</button>
+      </span>
+    </span>
+  );
+}
+
+// Transient git op feedback (notes/errors), shown as a line under the header so it
+// sits below the toolbar regardless of which tab is open.
+function GitFeedback({ git }: { git: GitRoom }) {
+  if (!git.error && !git.gitError && !git.note) return null;
+  return (
+    <>
       {git.error && <div className="error">{git.error}</div>}
       {git.gitError && <div className="error">git unavailable: {git.gitError}</div>}
       {git.note && <div className="gitnote" onClick={() => git.setNote('')}>{git.note}</div>}
@@ -1258,6 +1266,7 @@ export function App() {
               <button className={tab === 'terminal' ? 'tab active' : 'tab'} onClick={() => setTab('terminal')}>terminal</button>
               <button className={tab === 'git' ? 'tab active' : 'tab'} onClick={() => setTab('git')}>git</button>
               <button className={tab === 'subagents' ? 'tab active' : 'tab'} onClick={() => setTab('subagents')}>subagents</button>
+              {selectedRoom?.status === 'idle' && <GitBar git={git} />}
               <span className="spacer" />
               <span className="tab-actions">
                 {tab === 'terminal' && selectedRoom?.status === 'idle' && (
@@ -1268,7 +1277,7 @@ export function App() {
               </span>
             </div>
           </div>
-          {selectedRoom?.status === 'idle' && <GitBar git={git} />}
+          {selectedRoom?.status === 'idle' && <GitFeedback git={git} />}
 
           {error && <div className="error">{error}</div>}
           {!selectedRoom && <div className="splash"><strong>no room selected</strong><span>create a project from a local repo for a main room, or clone a separate room</span></div>}

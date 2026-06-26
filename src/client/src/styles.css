@@ -261,8 +261,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
    only the inline axis, so the terminal's height chain still resolves. */
 .ws { container: ws / inline-size; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .ws-head { border-bottom: 1px solid var(--hairline); padding: 8px 12px; }
-/* when the branch toolbar follows, title+tabs+toolbar read as one header block */
-.ws-head:has(+ .cmdrow) { border-bottom: 0; }
 .ws-title { align-items: baseline; display: flex; gap: 12px; margin-bottom: 7px; min-width: 0; }
 .ws-title .rname { color: var(--fg); font-size: 14px; }
 .ws-title .rpath { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -295,12 +293,13 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* ── git panel ─────────────────────────────────────────────────── */
 .git, .subs { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
 
-.cmdrow { align-items: center; border-bottom: 1px solid var(--hairline); color: var(--dim); display: flex; gap: 16px; padding: 6px 12px; }
-.cmdrow .branch-sel { align-items: center; display: flex; gap: 8px; margin-left: auto; }
-.cmdrow .lbl { color: var(--dim); }
-.cmdrow select { padding: 2px 6px; }
-.cmdrow .merge-sel { color: var(--dim); }
-.cmdrow .nb { width: 120px; }
+/* git branch toolbar — inline in the workspace header's tab row */
+.headgit { align-items: center; color: var(--dim); display: flex; flex-wrap: wrap; gap: 12px; margin-left: 16px; }
+.branch-sel { align-items: center; display: flex; gap: 8px; }
+.branch-sel .lbl { color: var(--dim); }
+.branch-sel select { padding: 2px 6px; }
+.branch-sel .merge-sel { color: var(--dim); }
+.branch-sel .nb { width: 120px; }
 
 /* adaptive fetch/pull/push button (GitHub Desktop style) */
 .sync { align-items: center; border: 1px solid var(--hairline-2); color: var(--fg); display: inline-flex; gap: 8px; padding: 3px 11px; }
@@ -481,8 +480,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* let the tab bar and the git/launcher rows wrap instead of overflowing */
 @container ws (max-width: 520px) {
   .tabs { flex-wrap: wrap; }
-  .cmdrow { flex-wrap: wrap; }
-  .cmdrow .branch-sel { margin-left: 0; }
+  .branch-sel { flex-wrap: wrap; }
+  .headgit { margin-left: 0; }
   .launcher { flex-wrap: wrap; }
   .launcher .name { flex: 1; width: auto; }
 }
