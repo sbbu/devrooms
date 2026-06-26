@@ -388,9 +388,16 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .dl .ln { border-right: 1px solid var(--hairline); color: var(--faint); flex: none; font-size: 12px; padding: 0 6px; text-align: right; user-select: none; width: 44px; }
 .dl .dc { color: var(--fg); flex: 1; font-size: 12px; min-width: 0; overflow-wrap: anywhere; padding: 0 10px; white-space: pre-wrap; }
 .dl.add { background: color-mix(in srgb, var(--green) 12%, transparent); }
-.dl.add .dc { color: var(--green); }
 .dl.del { background: color-mix(in srgb, var(--red) 12%, transparent); }
-.dl.del .dc { color: var(--red); }
+/* the +/- marker keeps the add/del colour; the code keeps default fg + syntax tokens */
+.dl .dpfx { color: var(--faint); }
+.dl.add .dpfx { color: var(--green); }
+.dl.del .dpfx { color: var(--red); }
+/* lightweight syntax highlighting (muted, from the theme palette) */
+.dc .sx-cmt { color: var(--faint); font-style: italic; }
+.dc .sx-str { color: var(--green); }
+.dc .sx-kw { color: var(--cyan); }
+.dc .sx-num { color: var(--yellow); }
 .dl.hunk { background: color-mix(in srgb, var(--cyan) 9%, transparent); }
 .dl.hunk .dc, .dl.hunk .ln { color: var(--cyan); }
 .dl.meta .dc { color: var(--dim); }

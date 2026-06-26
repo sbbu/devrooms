@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -144,6 +144,31 @@ function parseDiff(text: string): DiffRow[] {
   return rows;
 }
 
+// Lightweight, dependency-free, per-line syntax highlighting for diffs. Tokenises
+// comments / strings / numbers / keywords (C-family + TS/JS/etc.) — good enough for
+// readable diffs without a grammar engine. Per line, so a string/comment spanning
+// multiple lines may mis-highlight an interior line; an acceptable trade-off.
+const SX_KEYWORDS = new Set(
+  ('const let var function return if else for while do switch case break continue class extends new this super ' +
+   'import export from as default async await yield try catch finally throw typeof instanceof in of void delete ' +
+   'null undefined true false interface type enum namespace public private protected readonly static abstract ' +
+   'implements get set keyof infer satisfies package func fn struct impl pub use mod match def lambda pass with ' +
+   'raise except elif and or not is None True False nil val fun when go defer chan select').split(' '));
+const SX_RE = /(\/\/.*|\/\*[\s\S]*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d[\w.]*)|([A-Za-z_$][\w$]*)/g;
+function highlightCode(code: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  let last = 0, key = 0, m: RegExpExecArray | null;
+  SX_RE.lastIndex = 0;
+  while ((m = SX_RE.exec(code))) {
+    if (m.index > last) out.push(code.slice(last, m.index));
+    const cls = m[1] ? 'sx-cmt' : m[2] ? 'sx-str' : m[3] ? 'sx-num' : (m[4] && SX_KEYWORDS.has(m[4])) ? 'sx-kw' : null;
+    out.push(cls ? <span key={key++} className={cls}>{m[0]}</span> : m[0]);
+    last = m.index + m[0].length;
+  }
+  if (last < code.length) out.push(code.slice(last));
+  return out;
+}
+
 function DiffView({ text }: { text: string }) {
   if (!text.trim()) return <div className="empty">no textual changes</div>;
   const rows = parseDiff(text);
@@ -153,7 +178,9 @@ function DiffView({ text }: { text: string }) {
         <div key={i} className={`dl ${row.type}`}>
           <span className="ln">{row.oldNo ?? ''}</span>
           <span className="ln">{row.newNo ?? ''}</span>
-          <span className="dc">{row.text === '' ? ' ' : row.text}</span>
+          {row.type === 'add' || row.type === 'del' || row.type === 'ctx'
+            ? <span className="dc"><span className="dpfx">{row.text.slice(0, 1) || ' '}</span>{highlightCode(row.text.slice(1))}</span>
+            : <span className="dc">{row.text === '' ? ' ' : row.text}</span>}
         </div>
       ))}
     </div>
