@@ -424,6 +424,9 @@ function parseStatus(raw: string) {
   return { branch, files, raw, dirtyCount: files.length, ahead, behind, hasUpstream };
 }
 
+// Degraded status returned when git itself can't be read — keeps the panel rendering.
+const EMPTY_GIT_STATUS = { branch: '', files: [] as ReturnType<typeof parseStatus>['files'], raw: '', dirtyCount: 0, ahead: 0, behind: 0, hasUpstream: false, unpushedCount: 0, merging: false };
+
 // A file is still in conflict while it carries both the opening and closing merge
 // markers git writes. Requiring both avoids false positives from a lone `=======`.
 async function hasConflictMarkers(absPath: string): Promise<boolean> {
@@ -1191,11 +1194,18 @@ async function main() {
     try {
       const state = await getState();
       const room = getRoom(state, req.params.roomId);
-      const status = await runGit(room, ['status', '--porcelain=v1', '-b']);
-      const head = await runGit(room, ['rev-parse', '--short', 'HEAD']).catch(() => ({ stdout: '' }));
+      const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path);
+      if (status.exitCode !== 0) {
+        // Git is wedged (not a repo, locked index, half-applied state, …). Degrade
+        // gracefully so the panel keeps rendering and recovery stays reachable —
+        // the poller must never 500 and take the whole git UI down with it.
+        res.json({ status: EMPTY_GIT_STATUS, branches: [], head: '', gitError: (status.stderr || status.stdout || 'git status failed').trim() });
+        return;
+      }
+      const head = await run('git', ['rev-parse', '--short', 'HEAD'], room.path).catch(() => ({ stdout: '' }));
       // Commits on HEAD not reachable from any origin ref = unpushed. Works even
       // when the branch has no tracking upstream (where status's ahead count is 0).
-      const unpushed = await runGit(room, ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin']).catch(() => null);
+      const unpushed = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path).catch(() => ({ stdout: '' }));
       const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
       // A conflicted `pull` leaves MERGE_HEAD behind: the merge is in progress and
       // must be resolved+committed (or aborted) before push/pull can proceed.
@@ -1208,7 +1218,8 @@ async function main() {
           file.conflicted = await hasConflictMarkers(path.join(room.path, file.path));
         }));
       }
-      res.json({ status: { ...parsed, unpushedCount, merging }, branches: await listBranches(room), head: head.stdout.trim() });
+      const branches = await listBranches(room).catch(() => [] as string[]);
+      res.json({ status: { ...parsed, unpushedCount, merging }, branches, head: head.stdout.trim() });
     } catch (error) {
       apiError(error, res);
     }
@@ -1359,7 +1370,11 @@ async function main() {
       }
       res.json({ ok: true, stdout: result.stdout, stderr: result.stderr });
     } catch (error) {
-      apiError(error, res);
+      // Every op here is a git command; a non-zero exit (conflict, rejected push, dirty
+      // tree, nothing to commit, …) is a user-facing outcome, not a server fault. Report
+      // it as 409 so the client treats it as a handled result and the panel stays alive.
+      if (error instanceof HttpError && error.status === 500) apiError(new HttpError(409, error.message), res);
+      else apiError(error, res);
     }
   });
 

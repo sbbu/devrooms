@@ -7,7 +7,7 @@ import './styles.css';
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
-type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string };
+type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
@@ -687,6 +687,11 @@ function GitPanel({ room }: { room: Room }) {
         setError(null);
         setNote('merge conflicts — resolve the ! files, then commit the merge');
         await refresh();
+      } else if (op === 'pull' && /would be overwritten|commit your changes|please commit|stash/i.test(message)) {
+        // Dirty working tree blocks the merge. Point at the natural fix instead of a raw error.
+        setPushRejected(false);
+        setError(null);
+        setNote('you have uncommitted changes — commit them below (or stash) before pull & merge');
       } else {
         setError(message);
       }
@@ -701,6 +706,7 @@ function GitPanel({ room }: { room: Room }) {
   const hasUpstream = status?.status.hasUpstream ?? false;
   const merging = status?.status.merging ?? false;
   const conflicts = (status?.status.files ?? []).filter((file) => file.conflicted).length;
+  const gitError = status?.gitError;
   // One adaptive sync action, in git terms: pull when behind (incl. diverged),
   // otherwise push when there are unpushed commits, otherwise fetch to check.
   // A rejected push (origin ahead) forces pull & merge even when our cached
@@ -750,6 +756,7 @@ function GitPanel({ room }: { room: Room }) {
         <button className={view === 'history' ? 'gt active' : 'gt'} onClick={() => setView('history')}>history</button>
       </div>
       {error && <div className="error">{error}</div>}
+      {gitError && <div className="error">git unavailable: {gitError}</div>}
       {view === 'changes'
         ? <ChangesView room={room} status={status} branch={branch} onCommitted={refresh} />
         : <HistoryView room={room} reloadKey={reloadKey} />}

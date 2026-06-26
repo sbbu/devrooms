@@ -122,7 +122,10 @@ run('git', ['config', 'user.email', 'smoke@example.invalid'], src);
 writeFileSync(path.join(src, 'README.md'), 'hello\n');
 run('git', ['add', 'README.md'], src);
 run('git', ['commit', '-m', 'initial sample'], src);
-run('git', ['init', '--bare', remote], root);
+// -b main so the bare remote's HEAD matches the pushed branch (like a real GitHub
+// repo). Without it, HEAD defaults to master while content lives on main, and a
+// no-branch clone lands on an unborn branch.
+run('git', ['init', '--bare', '-b', 'main', remote], root);
 run('git', ['remote', 'add', 'origin', remote], src);
 run('git', ['push', '-u', 'origin', 'main'], src);
 
