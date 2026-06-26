@@ -161,6 +161,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .room-node .rname { color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
 .room-node .kind { color: var(--dim); margin-left: auto; }
 .room-node .count2 { color: var(--yellow); }
+/* per-room git signal: merge conflict (red !), commits to pull (↓) / push (↑) */
+.room-node .gitstate { display: inline-flex; gap: 6px; }
+.room-node .gs-conflict { color: var(--red); }
+.room-node .gs-pull, .room-node .gs-push { color: var(--cyan); }
 
 /* the cyan inverted block — the one "where am I" cursor */
 .row-sel { background: var(--cyan); color: var(--base); }
@@ -170,6 +174,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .row-sel .count2,
 .row-sel .mark,
 .row-sel .glyph { color: var(--base); }
+.row-sel .gs-conflict, .row-sel .gs-pull, .row-sel .gs-push { color: var(--base); }
 
 .glyph.idle { color: var(--green); }
 .glyph.creating { color: var(--yellow); }
@@ -219,7 +224,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 /* collapsed state: drop labels, center the glyphs, surface the monogram */
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .kind, .count2, .pname) { display: none; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .kind, .count2, .gitstate, .pname) { display: none; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .mark { display: inline; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .node { gap: 4px; justify-content: center; padding: 4px 0; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .project-node { border-top: 1px solid var(--hairline); } /* restores the grouping the ├/└ gave */
@@ -528,6 +533,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .cmd-input input:focus { border: none; outline: none; }
 .cmd-input input::placeholder { color: var(--faint); }
 
+.cmd-prompt .cmd-input:last-of-type { border-bottom: none; }
 .cmd-list { overflow-y: auto; padding: 4px 0; }
 .cmd-row { align-items: center; cursor: pointer; display: flex; gap: 10px; padding: 6px 12px; }
 .cmd-row.sel { background: var(--surface); box-shadow: inset 2px 0 0 var(--cyan); }

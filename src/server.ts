@@ -787,7 +787,11 @@ type ClaudeHookEntry = { matcher?: string; hooks: Array<{ type: string; command:
 type ClaudeSettings = { hooks?: Record<string, ClaudeHookEntry[]> } & Record<string, unknown>;
 
 function statusHookCommand(state: string) {
-  return `printf '\\033]9279;${state}\\033\\\\' >/dev/tty 2>/dev/null`;
+  // Redirect stderr BEFORE stdout: if there is no controlling terminal, opening
+  // /dev/tty fails, and with `2>/dev/null` already in effect that error is
+  // swallowed instead of leaking as "/dev/tty: Device not configured". `|| true`
+  // keeps the hook's exit status 0 so Claude Code never flags a failed hook.
+  return `printf '\\033]9279;${state}\\033\\\\' 2>/dev/null >/dev/tty || true`;
 }
 
 async function installClaudeStatusHooks(room: Room) {
@@ -805,8 +809,19 @@ async function installClaudeStatusHooks(room: Room) {
   let changed = false;
   for (const [event, state] of events) {
     const list = hooks[event] ?? (hooks[event] = []);
-    if (JSON.stringify(list).includes('9279')) continue; // ours already present
-    list.push({ matcher: '*', hooks: [{ type: 'command', command: statusHookCommand(state) }] });
+    const command = statusHookCommand(state);
+    // Find a previously-installed devrooms hook by its 9279 marker. If present but
+    // using an older command form, heal it in place; otherwise install fresh. This
+    // upgrades existing rooms instead of leaving stale (e.g. /dev/tty-erroring) hooks.
+    const ours = list.find((entry) => entry.hooks?.some((h) => h.command?.includes('9279')));
+    if (ours) {
+      if (ours.hooks.length === 1 && ours.hooks[0]?.command === command) continue; // already current
+      ours.matcher = '*';
+      ours.hooks = [{ type: 'command', command }];
+      changed = true;
+      continue;
+    }
+    list.push({ matcher: '*', hooks: [{ type: 'command', command }] });
     changed = true;
   }
   if (!changed) return;
@@ -944,6 +959,20 @@ function processCountsByRoom(state: State) {
     counts[proc.roomId] = current;
   }
   return counts;
+}
+
+// Lightweight per-room git signal for the sidebar: commits to pull (behind, vs
+// the last-fetched origin ref), commits to push (local commits no origin ref
+// holds — correct even without an upstream), and whether a merge left unmerged
+// paths. Two cheap reads per room; any failure (not a repo, wedged, timeout)
+// yields null so that room just shows no icons — the poller must never 500.
+async function gitRoomSignal(room: Room): Promise<{ behind: number; unpushed: number; conflict: boolean } | null> {
+  const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path, { timeoutMs: 5000 });
+  if (status.exitCode !== 0) return null;
+  const parsed = parseStatus(status.stdout);
+  const unpushed = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path, { timeoutMs: 5000 }).catch(() => ({ stdout: '' }));
+  const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
+  return { behind: parsed.behind, unpushed: unpushedCount, conflict: parsed.files.some((file) => file.unmerged) };
 }
 
 function metaSummary(state: State) {
@@ -1175,6 +1204,23 @@ async function main() {
   app.get('/api/projects', async (_req, res) => {
     const state = await getState();
     res.json({ projects: Object.values(state.projects), rooms: Object.values(state.rooms), processCounts: processCountsByRoom(state) });
+  });
+
+  // Per-room git signal for the sidebar (pull/push/conflict icons). Probed on its
+  // own poll so a slow git call never holds up the project list. Sparse map: only
+  // rooms with something to show appear (like processCounts). Never throws.
+  app.get('/api/git/summary', async (_req, res) => {
+    const state = await getState();
+    const summary: Record<string, { behind: number; unpushed: number; conflict: boolean }> = {};
+    await Promise.all(Object.values(state.rooms)
+      .filter((room) => room.status === 'idle') // skip creating/errored/half-materialized rooms
+      .map(async (room) => {
+        try {
+          const sig = await gitRoomSignal(room);
+          if (sig && (sig.behind > 0 || sig.unpushed > 0 || sig.conflict)) summary[room.id] = sig;
+        } catch { /* not a repo / wedged — no signal for this room */ }
+      }));
+    res.json({ summary });
   });
 
   app.post('/api/projects', async (req, res) => {
