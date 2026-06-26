@@ -124,9 +124,10 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
   };
 
   const cfg = getConfig();
+  const activeMode = resolveMode();
   // Enter a submode highlighting the current selection, so live-preview starts on
   // the active theme/appearance (no jump to row 0) and you arrow out from there.
-  const enterTheme = () => { setMode('theme'); setQuery(''); setIndex(Math.max(0, THEMES.findIndex((t) => t.id === cfg[resolveMode()]))); };
+  const enterTheme = () => { setMode('theme'); setQuery(''); setIndex(Math.max(0, THEMES.findIndex((t) => t.id === cfg.theme))); };
   const enterAppearance = () => { setMode('appearance'); setQuery(''); setIndex(Math.max(0, APPEARANCES.findIndex((a) => a.pref === cfg.appearance))); };
   const rootRows: Row[] = [
     { key: '_theme', title: 'theme', hint: 'change the color theme', search: 'theme color colors palette appearance', run: enterTheme },
@@ -137,14 +138,20 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
       run: () => { if (cmd.prompt) enterPrompt(cmd); else { cmd.perform(); onClose(); } },
     })),
   ];
-  const themeRows: Row[] = THEMES.map((theme) => ({
-    key: theme.id, title: theme.name.toLowerCase(), tag: theme.mode,
-    swatches: [theme.ui.base, theme.ui.surface, theme.ui.cyan, theme.ui.green, theme.ui.yellow, theme.ui.red],
-    checked: cfg[theme.mode] === theme.id,
-    search: `${theme.name} ${theme.mode} theme`,
-    preview: () => previewTheme(theme),
-    run: () => { commitTheme(theme); onClose(); },
-  }));
+  // Swatches preview the variant for the mode currently on screen, so the chips
+  // match what committing the theme would actually show. A theme isn't dark or
+  // light — appearance decides — so there's no mode tag.
+  const themeRows: Row[] = THEMES.map((theme) => {
+    const ui = (activeMode === 'light' ? theme.light : theme.dark).ui;
+    return {
+      key: theme.id, title: theme.name.toLowerCase(),
+      swatches: [ui.base, ui.surface, ui.cyan, ui.green, ui.yellow, ui.red],
+      checked: cfg.theme === theme.id,
+      search: `${theme.name} theme`,
+      preview: () => previewTheme(theme),
+      run: () => { commitTheme(theme); onClose(); },
+    };
+  });
   const appearanceRows: Row[] = APPEARANCES.map((a) => ({
     key: `ap_${a.pref}`, title: a.title,
     hint: a.pref === 'system' ? `${a.hint} — now ${getSystemMode()}` : a.hint,

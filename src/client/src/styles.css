@@ -154,7 +154,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 .project-node { color: var(--fg); margin-top: 2px; }
 .project-node:hover { color: var(--fg); }
-.project-node .branch { color: var(--dim); margin-left: auto; }
 .project-node.proj-active .pname { color: var(--cyan); }
 
 .room-node { color: var(--dim); }
@@ -225,7 +224,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 /* collapsed state: drop labels, center the glyphs, surface the monogram */
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .kind, .count2, .gitstate, .branch, .pname) { display: none; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .kind, .count2, .gitstate, .pname) { display: none; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .mark { display: inline; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .node { gap: 4px; justify-content: center; padding: 4px 0; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .project-node { border-top: 1px solid var(--hairline); } /* restores the grouping the ├/└ gave */
