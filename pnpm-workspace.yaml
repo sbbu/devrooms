@@ -1,4 +1,5 @@
 allowBuilds:
   '@homebridge/node-pty-prebuilt-multiarch': true
+  electron: true
   electron-winstaller: false
   esbuild: true
