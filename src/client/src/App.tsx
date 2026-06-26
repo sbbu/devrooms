@@ -1292,6 +1292,11 @@ export function App() {
     if (document.querySelector('.cmd-overlay')) return;
     const target = event.target as HTMLElement | null;
     const inText = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || !!target.isContentEditable);
+    // The terminal's hidden textarea (xterm-helper-textarea) isn't a real edit field
+    // and never receives ⌘ combos as input — so for shortcuts like ⌘⌫ (which would
+    // otherwise be suppressed wherever a textarea is focused, i.e. almost always),
+    // treat only genuine inputs as "text".
+    const inRealInput = !!target && (target.tagName === 'INPUT' || (target.tagName === 'TEXTAREA' && !target.classList.contains('xterm-helper-textarea')) || !!target.isContentEditable);
     if (!isMac && inText) return;
     const shift = event.shiftKey;
     const hit = (fn: () => void) => { event.preventDefault(); event.stopPropagation(); fn(); };
@@ -1304,7 +1309,7 @@ export function App() {
       case 'KeyT': if (!shift && selectedRoom?.status === 'idle' && terminalCount < 6) return hit(() => { setTab('terminal'); void addTerminal(); }); return;
       case 'KeyS': if (!shift && selectedRoom?.status === 'idle' && !git.merging) return hit(() => { void git.doOp(git.syncOp); }); return;
     }
-    if ((event.key === 'Backspace' || event.key === 'Delete') && !shift && !inText && selectedRoom) hit(() => { void deleteSelectedRoom(); });
+    if ((event.key === 'Backspace' || event.key === 'Delete') && !shift && !inRealInput && selectedRoom) hit(() => { void deleteSelectedRoom(); });
   };
 
   const activeTheme = resolveTheme(getConfig());
