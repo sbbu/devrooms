@@ -10,7 +10,7 @@ type Project = { id: string; name: string; repoUrl: string; rootPath?: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
-type GitSummary = { behind: number; unpushed: number; conflict: boolean };
+type GitSummary = { behind: number; unpushed: number; dirty: number; conflict: boolean };
 type GitSummaries = Record<string, GitSummary>;
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
@@ -1211,7 +1211,7 @@ export function App() {
                       const procLabel = compactProc(pc);
                       const mark = room.kind === 'main' ? room.name.charAt(0).toUpperCase() : room.name.charAt(0).toLowerCase();
                       const gs = gitSummary[room.id];
-                      const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
+                      const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.dirty ? `${gs.dirty} uncommitted` : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
                       const label = `${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
                       return (
                         <button
@@ -1227,9 +1227,10 @@ export function App() {
                             ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
                           <span className="rname">{room.name}</span>
-                          {gs && (gs.conflict || gs.behind > 0 || gs.unpushed > 0) && (
+                          {gs && (gs.conflict || gs.dirty > 0 || gs.behind > 0 || gs.unpushed > 0) && (
                             <span className="gitstate" aria-hidden="true">
                               {gs.conflict && <span className="gs-conflict" title="merge conflict">!</span>}
+                              {gs.dirty > 0 && <span className="gs-dirty" title={`${gs.dirty} uncommitted change${gs.dirty === 1 ? '' : 's'}`}>±{gs.dirty}</span>}
                               {gs.behind > 0 && <span className="gs-pull" title={`${gs.behind} to pull`}>↓{gs.behind}</span>}
                               {gs.unpushed > 0 && <span className="gs-push" title={`${gs.unpushed} to push`}>↑{gs.unpushed}</span>}
                             </span>

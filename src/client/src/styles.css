@@ -164,6 +164,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* per-room git signal: merge conflict (red !), commits to pull (↓) / push (↑) */
 .room-node .gitstate { display: inline-flex; gap: 6px; }
 .room-node .gs-conflict { color: var(--red); }
+.room-node .gs-dirty { color: var(--yellow); }
 .room-node .gs-pull, .room-node .gs-push { color: var(--cyan); }
 
 /* the cyan inverted block — the one "where am I" cursor */
@@ -174,7 +175,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .row-sel .count2,
 .row-sel .mark,
 .row-sel .glyph { color: var(--base); }
-.row-sel .gs-conflict, .row-sel .gs-pull, .row-sel .gs-push { color: var(--base); }
+.row-sel .gs-conflict, .row-sel .gs-dirty, .row-sel .gs-pull, .row-sel .gs-push { color: var(--base); }
 
 .glyph.idle { color: var(--green); }
 .glyph.creating { color: var(--yellow); }

@@ -966,13 +966,15 @@ function processCountsByRoom(state: State) {
 // holds — correct even without an upstream), and whether a merge left unmerged
 // paths. Two cheap reads per room; any failure (not a repo, wedged, timeout)
 // yields null so that room just shows no icons — the poller must never 500.
-async function gitRoomSignal(room: Room): Promise<{ behind: number; unpushed: number; conflict: boolean } | null> {
+async function gitRoomSignal(room: Room): Promise<{ behind: number; unpushed: number; dirty: number; conflict: boolean } | null> {
   const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path, { timeoutMs: 5000 });
   if (status.exitCode !== 0) return null;
   const parsed = parseStatus(status.stdout);
   const unpushed = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path, { timeoutMs: 5000 }).catch(() => ({ stdout: '' }));
   const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
-  return { behind: parsed.behind, unpushed: unpushedCount, conflict: parsed.files.some((file) => file.unmerged) };
+  // dirty = every uncommitted entry (modified, staged, untracked, unmerged) — "has
+  // work in progress", the count the changes tab would show.
+  return { behind: parsed.behind, unpushed: unpushedCount, dirty: parsed.dirtyCount, conflict: parsed.files.some((file) => file.unmerged) };
 }
 
 function metaSummary(state: State) {
@@ -1211,13 +1213,13 @@ async function main() {
   // rooms with something to show appear (like processCounts). Never throws.
   app.get('/api/git/summary', async (_req, res) => {
     const state = await getState();
-    const summary: Record<string, { behind: number; unpushed: number; conflict: boolean }> = {};
+    const summary: Record<string, { behind: number; unpushed: number; dirty: number; conflict: boolean }> = {};
     await Promise.all(Object.values(state.rooms)
       .filter((room) => room.status === 'idle') // skip creating/errored/half-materialized rooms
       .map(async (room) => {
         try {
           const sig = await gitRoomSignal(room);
-          if (sig && (sig.behind > 0 || sig.unpushed > 0 || sig.conflict)) summary[room.id] = sig;
+          if (sig && (sig.behind > 0 || sig.unpushed > 0 || sig.dirty > 0 || sig.conflict)) summary[room.id] = sig;
         } catch { /* not a repo / wedged — no signal for this room */ }
       }));
     res.json({ summary });
