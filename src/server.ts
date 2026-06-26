@@ -611,13 +611,28 @@ async function createRoom(projectId: string, body: unknown) {
   const input = body as Record<string, unknown>;
   const state = await getState();
   const project = getProject(state, projectId);
-  const branch = typeof input.branch === 'string' && input.branch.trim() ? input.branch.trim() : undefined;
-  // Name is optional now: fall back to the branch (the user's task identity), then to
-  // an auto "room-N". The display label is derived separately (deriveRoomLabel).
+  const explicitBranch = typeof input.branch === 'string' && input.branch.trim() ? input.branch.trim() : undefined;
+  // No branch given: default to the SOURCE repo's CURRENT branch (its checked-out
+  // HEAD), so a clone tracks whatever you're working on with zero typing. Only when
+  // cloning the local working copy itself (repoUrl === rootPath), where that branch is
+  // guaranteed to exist; a separately-configured remote might lack an unpushed local
+  // branch, so there we leave it blank and clone the repo default (origin/HEAD).
+  const branch = explicitBranch
+    ?? (project.rootPath && project.repoUrl === project.rootPath ? await branchForPath(project.rootPath) : undefined);
+  // Name is optional: fall back to the EXPLICIT branch (the user's task identity), then
+  // an auto "room-N". The DEFAULTED current branch is intentionally not used as a name —
+  // it would collide with the main room (e.g. "main") and isn't a chosen task label.
   const rawName = typeof input.name === 'string' ? input.name.trim() : '';
-  const name = rawName || branch || nextRoomHandle(state, project.id);
-  const id = slugify(`${project.id}-${name}`);
+  let name = rawName || explicitBranch || nextRoomHandle(state, project.id);
+  let id = slugify(`${project.id}-${name}`);
   if (!id) throw new HttpError(400, 'room id is empty after slugification');
+  // A non-typed name that collided (cloning the current branch when a same-named room
+  // already exists, e.g. "main") shouldn't 409 — fall back to a fresh room-N handle. A
+  // user-typed name still conflicts loudly so they can pick another.
+  if (state.rooms[id] && !rawName) {
+    name = nextRoomHandle(state, project.id);
+    id = slugify(`${project.id}-${name}`);
+  }
   if (state.rooms[id]) throw new HttpError(409, `room already exists: ${id}`);
 
   const roomPath = path.join(ROOMS_ROOT, project.id, slugify(name));
@@ -636,9 +651,10 @@ async function createRoom(projectId: string, body: unknown) {
     name,
     path: roomPath,
     kind: 'clone',
-    // No explicit branch => clone the repo's default branch (origin/HEAD, i.e.
-    // main/master) rather than whatever branch the project happened to launch on.
-    // The actual branch is recorded after the clone, in materializeRoom.
+    // Branch to clone: the one the user picked, else the source's current branch (set
+    // above), else the repo default (origin/HEAD) when neither is known. materializeRoom
+    // checks it out with --branch — a mistyped/missing branch surfaces as a clone error.
+    // The actually checked-out branch is recorded after the clone.
     branch,
     status: 'creating',
     createdAt: stamp,

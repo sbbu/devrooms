@@ -258,10 +258,30 @@ function disposeTerminalResource(key: string) {
   const cache = window.__DEVROOMS_TERMINALS__;
   const resource = cache?.get(key);
   if (!resource) return;
+  // Tear down reconnection FIRST: clearing wantEndpoint makes the socket's close
+  // handler skip scheduleReconnect, and clearing the timer stops a pending retry from
+  // firing connectTerminal against the now-disposed xterm. Otherwise disposing would
+  // paradoxically resurrect the resource.
+  resource.wantEndpoint = undefined;
+  resource.wantEnsure = undefined;
+  if (resource.reconnectTimer) { window.clearTimeout(resource.reconnectTimer); resource.reconnectTimer = undefined; }
   try { resource.socket?.close(); } catch { /* already closed */ }
   try { resource.input?.dispose(); } catch { /* noop */ }
   try { resource.term.dispose(); } catch { /* noop */ }
   cache!.delete(key);
+}
+
+// Dispose every cached terminal belonging to a room: its main `room:<id>` key plus
+// any extra `room:<id>:<tid>` tiles. Called when a room is deleted so a later room
+// that slugs to the same id can't inherit the dead xterm buffer or socket. Exact
+// match for main + a `:`-anchored prefix for tiles, so a sibling room whose id merely
+// starts with this id (e.g. `foo` vs `foo-bar`) is never swept up.
+function disposeRoomTerminals(roomId: string) {
+  const cache = window.__DEVROOMS_TERMINALS__;
+  if (!cache) return;
+  for (const key of [...cache.keys()]) {
+    if (key === `room:${roomId}` || key.startsWith(`room:${roomId}:`)) disposeTerminalResource(key);
+  }
 }
 
 function getTerminalResource(key: string) {
@@ -1087,6 +1107,81 @@ function SubagentsPanel({ room, presets }: { room: Room; presets: AgentPreset[] 
   );
 }
 
+// Clone-a-room overlay. Its own modal (reusing the palette's .cmd-* chrome), opened
+// by ⌘N and the "clone room…" command — deliberately NOT a sub-mode of the command
+// palette, so Esc closes it outright. The branch field is pre-seeded with the source
+// repo's current branch so you can clone off it with zero typing, and edited freely.
+function NewRoomDialog({ open, onClose, projectName, defaultBranch, disabled, onClone }: {
+  open: boolean;
+  onClose: () => void;
+  projectName?: string;
+  defaultBranch: string;
+  disabled?: boolean;
+  onClone: (name: string, branch: string) => void;
+}) {
+  const [branch, setBranch] = useState('');
+  const [name, setName] = useState('');
+  const branchRef = useRef<HTMLInputElement | null>(null);
+  const restoreRef = useRef<HTMLElement | null>(null);
+  // Read the latest default without making it a seed dependency, so a background
+  // rooms-poll that refreshes the current branch can't clobber an in-progress edit —
+  // we only (re)seed on the open transition.
+  const defaultBranchRef = useRef(defaultBranch);
+  defaultBranchRef.current = defaultBranch;
+
+  useEffect(() => {
+    if (!open) { restoreRef.current?.focus?.(); restoreRef.current = null; return undefined; }
+    restoreRef.current = document.activeElement as HTMLElement | null;
+    setBranch(defaultBranchRef.current); setName('');
+    // Focus and select the seeded branch so Enter clones the current branch, while a
+    // single keystroke replaces it to clone/branch off something else.
+    const raf = requestAnimationFrame(() => { branchRef.current?.focus(); branchRef.current?.select(); });
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
+
+  if (!open) return null;
+
+  const submit = () => { if (disabled) return; onClone(name.trim(), branch.trim()); onClose(); };
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') { event.preventDefault(); submit(); }
+    else if (event.key === 'Escape') { event.preventDefault(); onClose(); }
+  };
+
+  return (
+    <div className="cmd-overlay" onMouseDown={onClose}>
+      <div className="cmd cmd-prompt" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="cmd-input">
+          <span className="cmd-crumb">clone into {projectName ?? 'project'}<span className="cmd-crumb-sep">›</span></span>
+          <input
+            ref={branchRef}
+            value={branch}
+            onChange={(event) => setBranch(event.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="branch — defaults to the current branch"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </div>
+        <div className="cmd-input">
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="name (optional — defaults to the branch)"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </div>
+        <div className="cmd-foot">
+          <span><kbd>↵</kbd> clone room</span>
+          <span><kbd>tab</kbd> next field</span>
+          <span><kbd>esc</kbd> cancel</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -1104,7 +1199,10 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [paletteCmd, setPaletteCmd] = useState<string | null>(null); // open the palette straight into this command
+  // The clone-room form is its own overlay (⌘N / the "clone room…" command open it),
+  // not a sub-mode of the command palette — so Esc closes it outright instead of
+  // dropping you into an action menu you never opened.
+  const [showCloneRoom, setShowCloneRoom] = useState(false);
   const [, setThemeTick] = useState(0);
   const [activity, setActivity] = useState<Record<string, RoomActivity>>({});
   // When a room was last "seen" — attention older than this is acknowledged.
@@ -1140,6 +1238,15 @@ export function App() {
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
   const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId), [rooms, selectedRoomId]);
+  // The branch a new clone defaults to: the source repo's current checkout, read off
+  // the project's main room (which mirrors the working copy's live branch). Only when
+  // cloning from that local copy (repoUrl === rootPath) is that branch guaranteed to
+  // exist; a separately-configured remote may not have it, so leave the field blank
+  // there and let the server fall back to the repo default.
+  const projectCurrentBranch = useMemo(() => {
+    if (!selectedProject || selectedProject.repoUrl !== selectedProject.rootPath) return '';
+    return rooms.find((room) => room.projectId === selectedProject.id && room.kind === 'main')?.branch ?? '';
+  }, [rooms, selectedProject]);
   // Git state for the selected (ready) room — drives the branch toolbar in the
   // workspace header and the git panel below it from one shared source.
   const git = useGitRoom(selectedRoom?.status === 'idle' ? selectedRoom : null);
@@ -1173,6 +1280,14 @@ export function App() {
       api<Meta>('/api/meta'),
     ]);
     setProjects(projectData.projects); setRooms(projectData.rooms); setProcessCounts(projectData.processCounts ?? {}); setPresets(presetData.presets); setMeta(metaData);
+    // Reconcile the terminal cache against the live rooms: dispose any resource whose
+    // room is gone (covers deletes from another window and any path that didn't tidy up
+    // explicitly), so a recreated same-id room never reattaches a dead terminal.
+    const liveRoomIds = new Set(projectData.rooms.map((room) => room.id));
+    for (const key of [...(window.__DEVROOMS_TERMINALS__?.keys() ?? [])]) {
+      const match = /^room:([^:]+)/.exec(key);
+      if (match && !liveRoomIds.has(match[1])) disposeTerminalResource(key);
+    }
     if (!selectedProjectId && projectData.projects[0]) setSelectedProjectId(projectData.projects[0].id);
     if (!selectedRoomId && projectData.rooms[0]) setSelectedRoomId(projectData.rooms[0].id);
   }
@@ -1288,6 +1403,9 @@ export function App() {
     setBusy(true); setError(null);
     try {
       await api(`/api/rooms/${selectedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles }) });
+      // Drop the room's cached xterm + socket so a same-name recreate (which slugs to
+      // the same room id) starts from a clean terminal instead of the dead one.
+      disposeRoomTerminals(selectedRoom.id);
       setSelectedRoomId(null);
       await refresh();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -1335,14 +1453,7 @@ export function App() {
       id: 'new-room', title: 'clone room…',
       hint: selectedProject ? `clone a room into ${selectedProject.name}` : 'clone a room into this project',
       keywords: 'clone create new room', shortcut: `${MOD}N`,
-      prompt: {
-        title: 'clone room', submitLabel: 'clone room',
-        fields: [
-          { name: 'branch', placeholder: 'branch — new or existing (optional)', optional: true },
-          { name: 'name', placeholder: 'name (optional — defaults to the branch)', optional: true },
-        ],
-      },
-      perform: (values) => { void createRoom(values?.name ?? '', values?.branch ?? ''); },
+      perform: () => setShowCloneRoom(true),
     },
     { id: 'new-project', title: 'new project…', hint: 'pick a local repo folder', keywords: 'folder repo open add', shortcut: `${MODSHIFT}N`, perform: () => { void pickProjectFolder(); } },
     { id: 'toggle-sidebar', title: 'toggle sidebar', hint: 'show / hide the rooms rail', keywords: 'sidebar rail collapse expand', shortcut: `${MOD}B`, perform: () => toggleRail() },
@@ -1393,7 +1504,7 @@ export function App() {
       case 'Digit2': return hit(() => setTab('git'));
       case 'Digit3': return hit(() => setTab('subagents'));
       case 'KeyB': return hit(() => { if (shift) window.dispatchEvent(new Event('devrooms:branch-menu')); else toggleRail(); });
-      case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { setPaletteCmd('new-room'); setPaletteOpen(true); } });
+      case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { setShowCloneRoom(true); } });
       case 'KeyT': if (!shift && selectedRoom?.status === 'idle' && terminalCount < 6) return hit(() => { setTab('terminal'); void addTerminal(); }); return;
       case 'KeyS': if (!shift && selectedRoom?.status === 'idle' && !git.merging) return hit(() => { void git.doOp(git.syncOp); }); return;
       case 'KeyW': {
@@ -1505,13 +1616,13 @@ export function App() {
           ) : <div className="empty">no projects yet — hit + project</div>}
 
           <div className="addbar">
-            <button title={`new room (${MOD_KEY}N)`} onClick={() => { if (miniRail) { if (!forcedMini) expandRail(); setShowNewRoom(true); } else { setShowNewRoom((value) => !value); } }}>+ room<span className="kbd-hint">{MOD_KEY}N</span></button>
+            <button title={`new room (${MOD_KEY}N)`} onClick={() => { setRoomBranch(projectCurrentBranch); if (miniRail) { if (!forcedMini) expandRail(); setShowNewRoom(true); } else { setShowNewRoom((value) => !value); } }}>+ room<span className="kbd-hint">{MOD_KEY}N</span></button>
             <button title={`add project from folder (${MOD_SHIFT}N)`} disabled={busy} onClick={pickProjectFolder}>+ project<span className="kbd-hint">{MOD_SHIFT}N</span></button>
           </div>
           {showNewRoom && (
             <div className="addform">
               <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
-              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder="branch — new or existing (optional)" />
+              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder="branch — defaults to the current branch" />
               <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="name (optional — defaults to the branch)" />
               <button className="go" disabled={busy || !selectedProject} onClick={() => createRoom()}>clone room</button>
             </div>
@@ -1570,7 +1681,15 @@ export function App() {
         {meta && <span className="seg">up {formatUptime(meta.uptimeSeconds)}</span>}
       </div>
 
-      <CommandPalette open={paletteOpen} initialCommand={paletteCmd} onClose={() => { setPaletteOpen(false); setPaletteCmd(null); }} commands={commands} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+      <NewRoomDialog
+        open={showCloneRoom}
+        onClose={() => setShowCloneRoom(false)}
+        projectName={selectedProject?.name}
+        defaultBranch={projectCurrentBranch}
+        disabled={!selectedProject}
+        onClone={(name, branch) => { void createRoom(name, branch); }}
+      />
     </div>
   );
 }
