@@ -3,13 +3,14 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
-import { CommandPalette, type Command } from './CommandPalette';
+import { CommandPalette, score, type Command } from './CommandPalette';
 import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[]; label?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
-type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
+type Branch = { name: string; committedAt: number };
+type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: Branch[]; head: string; gitError?: string };
 type GitSummary = { behind: number; unpushed: number; dirty: number; conflict: boolean };
 type GitSummaries = Record<string, GitSummary>;
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
@@ -91,6 +92,18 @@ function relTime(iso: string) {
   const months = Math.round(days / 30);
   if (months < 12) return `${months}mo ago`;
   return `${Math.round(months / 12)}y ago`;
+}
+
+// Compact age ("5m" / "3h" / "2d" / "4mo" / "2y") from a unix-seconds timestamp,
+// for the branch picker's recency tag.
+function relAge(unixSec: number) {
+  if (!unixSec) return '';
+  const secs = Math.max(0, Math.round(Date.now() / 1000 - unixSec));
+  if (secs < 3600) return `${Math.max(1, Math.round(secs / 60))}m`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h`;
+  if (secs < 2592000) return `${Math.round(secs / 86400)}d`;
+  if (secs < 31536000) return `${Math.round(secs / 2592000)}mo`;
+  return `${Math.round(secs / 31536000)}y`;
 }
 
 const COMMIT_STATUS_CLASS: Record<string, string> = { A: 'new', M: 'modified', D: 'del', R: 'staged', C: 'staged' };
@@ -741,7 +754,7 @@ function useGitRoom(room: Room | null) {
   const hasUpstream = status?.status.hasUpstream ?? false;
   const merging = status?.status.merging ?? false;
   const conflicts = (status?.status.files ?? []).filter((file) => file.conflicted).length;
-  const otherBranches = (status?.branches ?? []).filter((name) => name !== branch);
+  const otherBranches = (status?.branches ?? []).filter((b) => b.name !== branch);
   const gitError = status?.gitError;
   // One adaptive sync action, in git terms: pull when behind (incl. diverged),
   // otherwise push when there are unpushed commits, otherwise fetch to check.
@@ -763,8 +776,102 @@ type GitRoom = ReturnType<typeof useGitRoom>;
 
 // The branch / sync / merge toolbar. Lives in the workspace header so it's
 // available on every tab (terminal, git, subagents), not just the git tab.
+// A searchable branch action menu (palette-style, reusing the .cmd-* UI): switch
+// branch (recency-sorted — abandoned ones sink), a "merge a branch in…" submode,
+// and inline "create branch '<typed>'". Replaces the old branch select + merge
+// select + new-branch field with one keyboard-driven picker.
+type BranchRow = { id: string; title: string; hint?: string; age?: string; checked?: boolean; act: () => void };
+
+function BranchMenu({ open, onClose, current, branches, canMerge, onCheckout, onCreate, onMerge }: {
+  open: boolean;
+  onClose: () => void;
+  current: string;
+  branches: Branch[];
+  canMerge: boolean;
+  onCheckout: (name: string) => void;
+  onCreate: (name: string) => void;
+  onMerge: (name: string) => void;
+}) {
+  const [mode, setMode] = useState<'switch' | 'merge'>('switch');
+  const [query, setQuery] = useState('');
+  const [index, setIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const restoreRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      restoreRef.current = document.activeElement as HTMLElement | null;
+      setMode('switch'); setQuery(''); setIndex(0);
+      const raf = requestAnimationFrame(() => inputRef.current?.focus());
+      return () => cancelAnimationFrame(raf);
+    }
+    restoreRef.current?.focus?.();
+    restoreRef.current = null;
+    return undefined;
+  }, [open]);
+
+  const q = query.trim();
+  const base: BranchRow[] = [];
+  if (mode === 'switch') {
+    if (canMerge) base.push({ id: '_merge', title: 'merge a branch in…', hint: `into ${current}`, act: () => { setMode('merge'); setQuery(''); setIndex(0); } });
+    for (const b of branches) base.push({ id: `sw:${b.name}`, title: b.name, age: relAge(b.committedAt), checked: b.name === current, act: () => { if (b.name !== current) onCheckout(b.name); onClose(); } });
+  } else {
+    for (const b of branches.filter((b) => b.name !== current)) base.push({ id: `mg:${b.name}`, title: b.name, age: relAge(b.committedAt), act: () => { onMerge(b.name); onClose(); } });
+  }
+  let rows = q
+    ? base.map((r, i) => ({ r, s: score(q, `${r.title} ${r.hint ?? ''}`), i })).filter((e) => e.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((e) => e.r)
+    : base;
+  // Type a name that isn't an existing branch → offer to create it (switch mode only).
+  if (mode === 'switch' && q && !branches.some((b) => b.name === q)) {
+    rows = [...rows, { id: '_create', title: `create branch “${q}”`, age: 'new', act: () => { onCreate(q); onClose(); } }];
+  }
+  const idx = rows.length ? Math.min(index, rows.length - 1) : 0;
+  const activeId = rows[idx]?.id ?? null;
+  useEffect(() => { listRef.current?.querySelector('.cmd-row.sel')?.scrollIntoView({ block: 'nearest' }); }, [activeId]);
+
+  if (!open) return null;
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown') { event.preventDefault(); setIndex((i) => (rows.length ? (Math.min(i, rows.length - 1) + 1) % rows.length : 0)); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setIndex((i) => (rows.length ? (Math.min(i, rows.length - 1) - 1 + rows.length) % rows.length : 0)); }
+    else if (event.key === 'Enter') { event.preventDefault(); rows[idx]?.act(); }
+    else if (event.key === 'Escape') { event.preventDefault(); if (mode === 'merge') { setMode('switch'); setQuery(''); setIndex(0); } else onClose(); }
+    else if (event.key === 'Backspace' && query === '' && mode === 'merge') { event.preventDefault(); setMode('switch'); setIndex(0); }
+  };
+
+  return (
+    <div className="cmd-overlay" onMouseDown={onClose}>
+      <div className="cmd" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="cmd-input">
+          {mode === 'merge' && <span className="cmd-crumb">merge into {current}<span className="cmd-crumb-sep">›</span></span>}
+          <input ref={inputRef} value={query} onChange={(event) => { setQuery(event.target.value); setIndex(0); }} onKeyDown={onKeyDown}
+            placeholder={mode === 'merge' ? 'pick a branch to merge…' : 'switch branch, or type a new name…'} spellCheck={false} autoComplete="off" />
+        </div>
+        <div className="cmd-list" ref={listRef}>
+          {rows.length ? rows.map((row, i) => (
+            <div key={row.id} className={i === idx ? 'cmd-row sel' : 'cmd-row'} onMouseMove={() => setIndex(i)} onMouseDown={(event) => { event.preventDefault(); row.act(); }}>
+              <span className="cmd-main">
+                <span className="cmd-title">{row.title}</span>
+                {row.hint && <span className="cmd-hint">{row.hint}</span>}
+              </span>
+              {row.age && <span className="branch-age">{row.age}</span>}
+              {row.checked && <span className="cmd-check">●</span>}
+            </div>
+          )) : <div className="cmd-empty">no matches</div>}
+        </div>
+        <div className="cmd-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> select</span>
+          <span><kbd>esc</kbd> {mode === 'merge' ? 'back' : 'close'}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GitBar({ git }: { git: GitRoom }) {
-  const [newBranch, setNewBranch] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
   const { branch, otherBranches, merging, conflicts, syncing, syncOp, syncLabel, syncTitle, behind, unpushed, doOp, gitOp } = git;
   return (
     <span className="headgit">
@@ -785,22 +892,19 @@ function GitBar({ git }: { git: GitRoom }) {
           )}
         </button>
       )}
-      <span className="branch-sel">
-        <span className="lbl">branch</span>
-        <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
-          {(git.status?.branches ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
-        </select>
-        {!merging && otherBranches.length > 0 && (
-          // Action menu: stays on "merge…"; picking a branch merges it into the current one.
-          <select className="merge-sel" value="" disabled={syncing} title={`merge another branch into ${branch}`}
-            onChange={(event) => { const src = event.target.value; if (src && window.confirm(`merge ${src} into ${branch}?`)) gitOp('merge', { branch: src }); }}>
-            <option value="" disabled>merge…</option>
-            {otherBranches.map((name) => <option key={name} value={name}>{name}</option>)}
-          </select>
-        )}
-        <input className="nb" value={newBranch} onChange={(event) => setNewBranch(event.target.value)} placeholder="new branch" />
-        <button disabled={!newBranch.trim()} onClick={() => gitOp('checkout-new', { branch: newBranch.trim() }).then((ok) => { if (ok) setNewBranch(''); })}>create</button>
-      </span>
+      <button className="branch-btn" disabled={syncing} onClick={() => setMenuOpen(true)} title="switch / merge / create branch">
+        <span className="branch-cur">{branch || 'branch'}</span><span className="branch-caret">▾</span>
+      </button>
+      <BranchMenu
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        current={branch}
+        branches={git.status?.branches ?? []}
+        canMerge={!merging && otherBranches.length > 0}
+        onCheckout={(name) => gitOp('checkout', { branch: name })}
+        onCreate={(name) => gitOp('checkout-new', { branch: name })}
+        onMerge={(name) => { if (window.confirm(`merge ${name} into ${branch}?`)) gitOp('merge', { branch: name }); }}
+      />
     </span>
   );
 }

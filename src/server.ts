@@ -438,26 +438,29 @@ async function hasConflictMarkers(absPath: string): Promise<boolean> {
   }
 }
 
-async function listBranches(room: Room) {
-  // Include remote-tracking branches, not just local ones: a fresh clone has a
-  // single local branch, so without the origin/* refs the branch picker would
-  // only ever offer that one branch. Checking out a bare "main" that exists only
-  // as origin/main makes git auto-create a local tracking branch (DWIM). Use full
-  // refnames (not :short, which collapses refs/remotes/origin/HEAD to "origin").
-  const result = await runGit(room, ['branch', '-a', '--format=%(refname)']);
-  const seen = new Set<string>();
-  const branches: string[] = [];
-  for (const ref of result.stdout.split('\n').map((line) => line.trim()).filter(Boolean)) {
-    if (ref.endsWith('/HEAD')) continue; // skip symbolic refs like origin/HEAD
+async function listBranches(room: Room): Promise<{ name: string; committedAt: number }[]> {
+  // One entry per branch with its last-commit time (unix), most-recent first, so the
+  // picker floats active branches to the top and sinks abandoned ones. Includes
+  // remote-tracking origin/* (a fresh clone has only those; checking one out makes
+  // git auto-create a local tracking branch — DWIM) collapsed to short names. Skip
+  // origin/HEAD and other remotes (checking those out would detach HEAD).
+  const result = await runGit(room, ['for-each-ref', '--format=%(committerdate:unix)%09%(refname)', 'refs/heads/', 'refs/remotes/origin/']);
+  const byName = new Map<string, number>();
+  for (const line of result.stdout.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const when = Number(line.slice(0, tab)) || 0;
+    const ref = line.slice(tab + 1).trim();
+    if (ref.endsWith('/HEAD')) continue;
     let name: string;
     if (ref.startsWith('refs/heads/')) name = ref.slice('refs/heads/'.length);
     else if (ref.startsWith('refs/remotes/origin/')) name = ref.slice('refs/remotes/origin/'.length);
-    else continue; // skip non-origin remotes (checking them out would detach HEAD)
-    if (seen.has(name)) continue; // local branch already covers this name
-    seen.add(name);
-    branches.push(name);
+    else continue;
+    // Local and remote of the same name collapse to one row; keep the newer date.
+    const prev = byName.get(name);
+    if (prev === undefined || when > prev) byName.set(name, when);
   }
-  return branches;
+  return [...byName].map(([name, committedAt]) => ({ name, committedAt })).sort((a, b) => b.committedAt - a.committedAt);
 }
 
 async function currentBranch(room: Room) {
@@ -1397,7 +1400,7 @@ async function main() {
           file.conflicted = await hasConflictMarkers(path.join(room.path, file.path));
         }));
       }
-      const branches = await listBranches(room).catch(() => [] as string[]);
+      const branches = await listBranches(room).catch(() => [] as { name: string; committedAt: number }[]);
       res.json({ status: { ...parsed, unpushedCount, merging }, branches, head: head.stdout.trim() });
     } catch (error) {
       apiError(error, res);

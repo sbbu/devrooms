@@ -44,7 +44,7 @@ type Row = {
 };
 
 // Cheap ranked match: prefix > word-boundary > substring > subsequence.
-function score(query: string, text: string): number {
+export function score(query: string, text: string): number {
   if (!query) return 1;
   const q = query.toLowerCase();
   const t = text.toLowerCase();

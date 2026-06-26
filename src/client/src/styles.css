@@ -298,11 +298,13 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* git branch toolbar — inline in the workspace header's tab row */
 .headgit { align-items: center; color: var(--dim); display: flex; flex-wrap: wrap; gap: 12px; margin-left: 16px; }
-.branch-sel { align-items: center; display: flex; gap: 8px; }
-.branch-sel .lbl { color: var(--dim); }
-.branch-sel select { padding: 2px 6px; }
-.branch-sel .merge-sel { color: var(--dim); }
-.branch-sel .nb { width: 120px; }
+/* the one branch trigger — opens the searchable switch/merge/create menu */
+.branch-btn { align-items: baseline; border: 1px solid var(--hairline); color: var(--fg); display: inline-flex; gap: 6px; padding: 2px 8px; }
+.branch-btn:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--fg); }
+.branch-btn:disabled { color: var(--faint); }
+.branch-btn .branch-caret { color: var(--dim); font-size: 10px; }
+/* recency tag on a branch row, right-aligned (lowercase — not the uppercase cmd-tag) */
+.cmd-row .branch-age { color: var(--faint); flex: none; font-size: 11px; }
 
 /* adaptive fetch/pull/push button (GitHub Desktop style) */
 .sync { align-items: center; border: 1px solid var(--hairline-2); color: var(--fg); display: inline-flex; gap: 8px; padding: 3px 11px; }
@@ -483,7 +485,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* let the tab bar and the git/launcher rows wrap instead of overflowing */
 @container ws (max-width: 520px) {
   .tabs { flex-wrap: wrap; }
-  .branch-sel { flex-wrap: wrap; }
   .headgit { margin-left: 0; }
   .launcher { flex-wrap: wrap; }
   .launcher .name { flex: 1; width: auto; }
