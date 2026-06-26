@@ -3,6 +3,8 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
+import { CommandPalette, type Command } from './CommandPalette';
+import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
@@ -194,7 +196,7 @@ function getTerminalResource(key: string) {
     lineHeight: 1.18,
     macOptionIsMeta: true,
     scrollback: 10000,
-    theme: { background: '#16181d', foreground: '#c5c8d0', cursor: '#7fb4ca', selectionBackground: '#2a3340' },
+    theme: getActiveTheme().terminal,
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -719,6 +721,30 @@ export function App() {
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [, setThemeTick] = useState(0);
+
+  // Re-render (status bar theme readout) whenever a theme is committed or the
+  // system light/dark setting flips while on "system".
+  useEffect(() => subscribe(() => setThemeTick((tick) => tick + 1)), []);
+
+  // ⌘P / ⌘K toggles the palette (Ctrl on non-mac). Capture phase so it wins over
+  // xterm and the browser print shortcut. The modifier is gated by platform so
+  // Ctrl+P/Ctrl+K stay free for readline/emacs editing inside the terminal on
+  // macOS. event.code (physical key) keeps it working under Caps Lock / Shift.
+  useEffect(() => {
+    const isMac = window.devrooms?.platform === 'darwin' || /Mac/i.test(navigator.platform);
+    const onKey = (event: KeyboardEvent) => {
+      const mod = isMac ? event.metaKey : event.ctrlKey;
+      if (mod && !event.altKey && (event.code === 'KeyP' || event.code === 'KeyK')) {
+        event.preventDefault();
+        event.stopPropagation();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
   const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId), [rooms, selectedRoomId]);
@@ -818,6 +844,25 @@ export function App() {
   const terminalCount = selectedRoom?.terminals?.length ?? 1;
   const branchLabel = selectedRoom?.branch ?? selectedProject?.defaultBranch ?? '';
 
+  // App actions surfaced in the command palette (Theme + Appearance are added by
+  // the palette itself). Rebuilt each render so the closures see current state.
+  const commands: Command[] = [
+    { id: 'go-terminal', title: 'Go to Terminal', hint: 'Show the terminal tab', keywords: 'terminal shell view', perform: () => setTab('terminal') },
+    { id: 'go-git', title: 'Go to Git', hint: 'Show the git tab', keywords: 'git diff changes commit', perform: () => setTab('git') },
+    { id: 'go-subagents', title: 'Go to Subagents', hint: 'Show the subagents tab', keywords: 'agents processes hermes claude codex', perform: () => setTab('subagents') },
+    { id: 'refresh', title: 'Refresh', hint: 'Reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
+    { id: 'new-room', title: 'New Room…', hint: 'Clone a room into this project', keywords: 'clone create', perform: () => setShowNewRoom((value) => !value) },
+    { id: 'new-project', title: 'New Project…', hint: 'Pick a local repo folder', keywords: 'folder repo open add', perform: () => { void pickProjectFolder(); } },
+  ];
+  if (selectedRoom?.status === 'idle' && terminalCount < 6) {
+    commands.splice(1, 0, { id: 'new-terminal', title: 'New Terminal', hint: 'Add a tiled terminal to this room', keywords: 'split pane add tiled', perform: () => { void addTerminal(); } });
+  }
+  if (selectedRoom) {
+    commands.push({ id: 'delete-room', title: 'Delete Current Room', hint: selectedRoom.name, keywords: 'remove destroy', perform: () => { void deleteSelectedRoom(); } });
+  }
+
+  const activeTheme = resolveTheme(getConfig());
+
   return (
     <div className="app">
       <div className="titlebar">
@@ -832,6 +877,7 @@ export function App() {
           <span className="name">devrooms</span>
         </span>
         <span className="meta">
+          <button className="palette-hint" onClick={() => setPaletteOpen(true)} title="Command palette">{window.devrooms?.platform === 'darwin' ? '⌘' : 'Ctrl'} P</button>
           <span><span className={meta ? 'dot' : 'dot off'} />{meta ? 'daemon' : 'no daemon'}</span>
           {meta && <span className="ver">v{meta.version}</span>}
         </span>
@@ -933,9 +979,12 @@ export function App() {
         {branchLabel && <span className="seg">{branchLabel}</span>}
         <span className="seg">{'⏵'} {runningCount}/{roomProcesses.length} proc</span>
         <span className="spacer" />
+        <button className="seg theme-seg" onClick={() => setPaletteOpen(true)} title="Change theme (⌘P)"><span className="theme-chip" style={{ background: activeTheme.ui.cyan }} />{activeTheme.name}</button>
         {meta && <span className="seg">{meta.bindHost}:{meta.port}</span>}
         {meta && <span className="seg">up {formatUptime(meta.uptimeSeconds)}</span>}
       </div>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
     </div>
   );
 }
