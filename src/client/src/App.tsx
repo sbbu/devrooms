@@ -1030,11 +1030,11 @@ export function App() {
     finally { setBusy(false); }
   }
 
-  async function createRoom() {
-    if (!selectedProject) return;
+  async function createRoom(name = roomName, branch = roomBranch) {
+    if (!selectedProject || !name.trim()) return;
     setBusy(true); setError(null);
     try {
-      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: roomName, branch: roomBranch || undefined }) });
+      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: name.trim(), branch: branch.trim() || undefined }) });
       setSelectedRoomId(data.room.id);
       setShowNewRoom(false);
       await refresh();
@@ -1086,7 +1086,19 @@ export function App() {
     { id: 'go-git', title: 'go to git', hint: 'show the git tab', keywords: 'git diff changes commit', perform: () => setTab('git') },
     { id: 'go-subagents', title: 'go to subagents', hint: 'show the subagents tab', keywords: 'agents processes hermes claude codex', perform: () => setTab('subagents') },
     { id: 'refresh', title: 'refresh', hint: 'reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
-    { id: 'new-room', title: 'new room…', hint: 'clone a room into this project', keywords: 'clone create', perform: () => setShowNewRoom((value) => !value) },
+    {
+      id: 'new-room', title: 'clone room…',
+      hint: selectedProject ? `clone a room into ${selectedProject.name}` : 'clone a room into this project',
+      keywords: 'clone create new room',
+      prompt: {
+        title: 'clone room', submitLabel: 'clone room',
+        fields: [
+          { name: 'name', placeholder: 'room name' },
+          { name: 'branch', placeholder: `branch — defaults to ${selectedProject?.defaultBranch ?? 'project default'}`, optional: true },
+        ],
+      },
+      perform: (values) => { void createRoom(values?.name ?? '', values?.branch ?? ''); },
+    },
     { id: 'new-project', title: 'new project…', hint: 'pick a local repo folder', keywords: 'folder repo open add', perform: () => { void pickProjectFolder(); } },
   ];
   if (selectedRoom?.status === 'idle' && terminalCount < 6) {
@@ -1191,7 +1203,7 @@ export function App() {
               <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
               <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="room name" />
               <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder={`branch (${selectedProject?.defaultBranch ?? 'default'})`} />
-              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={createRoom}>clone room</button>
+              <button className="go" disabled={busy || !selectedProject || !roomName.trim()} onClick={() => createRoom()}>clone room</button>
             </div>
           )}
         </aside>

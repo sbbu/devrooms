@@ -6,6 +6,14 @@ import {
   type Appearance,
 } from './themes';
 
+// A single text input collected by a command's inline prompt.
+export type CommandField = {
+  name: string;          // key in the values map handed to perform()
+  placeholder: string;
+  optional?: boolean;    // required fields gate submission
+  defaultValue?: string;
+};
+
 // A command surfaced in the palette's root list. The palette owns the Theme and
 // Appearance entries itself; everything else (navigation, room/terminal actions)
 // is supplied by the app.
@@ -14,10 +22,14 @@ export type Command = {
   title: string;
   hint?: string;
   keywords?: string;
-  perform: () => void;
+  // Selecting a command either runs it immediately or, when it declares a
+  // `prompt`, opens an inline field form in the palette and runs perform() with
+  // the collected values on submit.
+  perform: (values?: Record<string, string>) => void;
+  prompt?: { title: string; submitLabel: string; fields: CommandField[] };
 };
 
-type PaletteMode = 'root' | 'theme' | 'appearance';
+type PaletteMode = 'root' | 'theme' | 'appearance' | 'prompt';
 
 type Row = {
   key: string;
@@ -64,8 +76,11 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
   const [mode, setMode] = useState<PaletteMode>('root');
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
+  const [promptCmd, setPromptCmd] = useState<Command | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const fieldRefs = useRef<(HTMLInputElement | null)[]>([]);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   // Open: remember the focused element (usually the live terminal) and focus the
@@ -81,7 +96,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
       return () => cancelAnimationFrame(raf);
     }
     revertPreview();
-    setMode('root'); setQuery(''); setIndex(0);
+    setMode('root'); setQuery(''); setIndex(0); setPromptCmd(null); setValues({});
     restoreFocusRef.current?.focus?.();
     restoreFocusRef.current = null;
     return undefined;
@@ -90,6 +105,23 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
   // Move to root/submode with the highlight reset in the same batch, so the
   // preview effect fires once for the new top row (never a stale/clamped index).
   const go = (next: PaletteMode) => { setMode(next); setQuery(''); setIndex(0); };
+
+  // Open a command's inline field form, seeding each field with its default.
+  const enterPrompt = (cmd: Command) => {
+    const seed: Record<string, string> = {};
+    cmd.prompt!.fields.forEach((field) => { seed[field.name] = field.defaultValue ?? ''; });
+    setPromptCmd(cmd); setValues(seed); setMode('prompt'); setQuery(''); setIndex(0);
+  };
+
+  const promptReady = promptCmd?.prompt!.fields.every((f) => f.optional || (values[f.name] ?? '').trim()) ?? false;
+  const submitPrompt = () => {
+    if (!promptCmd) return;
+    // Enter on an incomplete form jumps to the first missing required field
+    // instead of firing, so the action never runs half-specified.
+    const missing = promptCmd.prompt!.fields.findIndex((f) => !f.optional && !(values[f.name] ?? '').trim());
+    if (missing >= 0) { fieldRefs.current[missing]?.focus(); return; }
+    promptCmd.perform(values); onClose();
+  };
 
   const cfg = getConfig();
   // Enter a submode highlighting the current selection, so live-preview starts on
@@ -102,7 +134,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     ...commands.map((cmd) => ({
       key: cmd.id, title: cmd.title, hint: cmd.hint,
       search: `${cmd.title} ${cmd.keywords ?? ''}`,
-      run: () => { cmd.perform(); onClose(); },
+      run: () => { if (cmd.prompt) enterPrompt(cmd); else { cmd.perform(); onClose(); } },
     })),
   ];
   const themeRows: Row[] = THEMES.map((theme) => ({
@@ -131,16 +163,19 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
   useEffect(() => {
-    if (!open || mode === 'root' || activeKey == null) return;
+    if (!open || (mode !== 'theme' && mode !== 'appearance') || activeKey == null) return;
     filteredRef.current.find((row) => row.key === activeKey)?.preview?.();
   }, [open, mode, activeKey]);
 
   // Keep the highlighted row in view.
   useEffect(() => { listRef.current?.querySelector('.cmd-row.sel')?.scrollIntoView({ block: 'nearest' }); }, [activeKey]);
 
+  // Land the cursor in the first prompt field the moment the form appears.
+  useEffect(() => { if (open && mode === 'prompt') fieldRefs.current[0]?.focus(); }, [open, mode, promptCmd]);
+
   if (!open) return null;
 
-  const backToRoot = () => { revertPreview(); go('root'); inputRef.current?.focus(); };
+  const backToRoot = () => { revertPreview(); setPromptCmd(null); setValues({}); go('root'); inputRef.current?.focus(); };
 
   function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === 'ArrowDown') {
@@ -161,8 +196,57 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     }
   }
 
+  // Field keys: Enter submits (or jumps to the first gap), Escape/empty-Backspace
+  // backs out, and Tab cycles fields so the whole form stays keyboard-only.
+  function onFieldKeyDown(event: React.KeyboardEvent<HTMLInputElement>, fieldIndex: number) {
+    const fields = promptCmd?.prompt!.fields ?? [];
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitPrompt();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      backToRoot();
+    } else if (event.key === 'Backspace' && (values[fields[fieldIndex]?.name] ?? '') === '' && fieldIndex === 0) {
+      event.preventDefault();
+      backToRoot();
+    } else if (event.key === 'Tab') {
+      event.preventDefault();
+      const next = (fieldIndex + (event.shiftKey ? -1 : 1) + fields.length) % fields.length;
+      fieldRefs.current[next]?.focus();
+    }
+  }
+
   const crumb = mode === 'theme' ? 'theme' : mode === 'appearance' ? 'appearance' : null;
   const placeholder = mode === 'theme' ? 'search themes…' : mode === 'appearance' ? 'choose appearance…' : 'search settings and commands…';
+
+  if (mode === 'prompt' && promptCmd) {
+    const fields = promptCmd.prompt!.fields;
+    return (
+      <div className="cmd-overlay" onMouseDown={onClose}>
+        <div className="cmd cmd-prompt" onMouseDown={(event) => event.stopPropagation()}>
+          {fields.map((field, i) => (
+            <div className="cmd-input" key={field.name}>
+              {i === 0 && <span className="cmd-crumb">{promptCmd.prompt!.title}<span className="cmd-crumb-sep">›</span></span>}
+              <input
+                ref={(el) => { fieldRefs.current[i] = el; }}
+                value={values[field.name] ?? ''}
+                onChange={(event) => setValues((v) => ({ ...v, [field.name]: event.target.value }))}
+                onKeyDown={(event) => onFieldKeyDown(event, i)}
+                placeholder={field.optional ? `${field.placeholder} (optional)` : field.placeholder}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          ))}
+          <div className="cmd-foot">
+            <span><kbd>↵</kbd> {promptReady ? promptCmd.prompt!.submitLabel : 'fill required fields'}</span>
+            <span><kbd>tab</kbd> next field</span>
+            <span><kbd>esc</kbd> back</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="cmd-overlay" onMouseDown={onClose}>
