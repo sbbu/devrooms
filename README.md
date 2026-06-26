@@ -2,6 +2,8 @@
 
 devrooms is a local-first cockpit for multi-agent software work.
 
+![devrooms power-user workspace with multiple projects, rooms, tiled terminals, git state, and agent processes](docs/assets/devrooms-poweruser.png)
+
 It gives each project durable room-style workspaces: full repo clones with a terminal, git status/diff controls, and attachable agent/subprocess terminals.
 
 ## Current v0
