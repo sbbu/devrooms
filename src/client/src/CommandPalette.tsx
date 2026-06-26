@@ -67,9 +67,9 @@ function filterRows(rows: Row[], query: string): Row[] {
 }
 
 const APPEARANCES: { pref: Appearance; title: string; hint: string }[] = [
-  { pref: 'system', title: 'System', hint: 'Follow the OS appearance' },
-  { pref: 'light', title: 'Light', hint: 'Always use the light theme' },
-  { pref: 'dark', title: 'Dark', hint: 'Always use the dark theme' },
+  { pref: 'system', title: 'system', hint: 'follow the os appearance' },
+  { pref: 'light', title: 'light', hint: 'always use the light theme' },
+  { pref: 'dark', title: 'dark', hint: 'always use the dark theme' },
 ];
 
 export function CommandPalette({ open, onClose, commands }: { open: boolean; onClose: () => void; commands: Command[] }) {
@@ -129,8 +129,8 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
   const enterTheme = () => { setMode('theme'); setQuery(''); setIndex(Math.max(0, THEMES.findIndex((t) => t.id === cfg[resolveMode()]))); };
   const enterAppearance = () => { setMode('appearance'); setQuery(''); setIndex(Math.max(0, APPEARANCES.findIndex((a) => a.pref === cfg.appearance))); };
   const rootRows: Row[] = [
-    { key: '_theme', title: 'Theme', hint: 'Change the color theme', search: 'theme color colors palette appearance', run: enterTheme },
-    { key: '_appearance', title: 'Appearance', hint: `System · light · dark — now ${resolveMode()}`, search: 'appearance light dark mode system', run: enterAppearance },
+    { key: '_theme', title: 'theme', hint: 'change the color theme', search: 'theme color colors palette appearance', run: enterTheme },
+    { key: '_appearance', title: 'appearance', hint: `system · light · dark — now ${resolveMode()}`, search: 'appearance light dark mode system', run: enterAppearance },
     ...commands.map((cmd) => ({
       key: cmd.id, title: cmd.title, hint: cmd.hint,
       search: `${cmd.title} ${cmd.keywords ?? ''}`,
@@ -138,7 +138,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     })),
   ];
   const themeRows: Row[] = THEMES.map((theme) => ({
-    key: theme.id, title: theme.name, tag: theme.mode,
+    key: theme.id, title: theme.name.toLowerCase(), tag: theme.mode,
     swatches: [theme.ui.base, theme.ui.surface, theme.ui.cyan, theme.ui.green, theme.ui.yellow, theme.ui.red],
     checked: cfg[theme.mode] === theme.id,
     search: `${theme.name} ${theme.mode} theme`,
@@ -216,8 +216,8 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     }
   }
 
-  const crumb = mode === 'theme' ? 'Theme' : mode === 'appearance' ? 'Appearance' : null;
-  const placeholder = mode === 'theme' ? 'Search themes…' : mode === 'appearance' ? 'Choose appearance…' : 'Search settings and commands…';
+  const crumb = mode === 'theme' ? 'theme' : mode === 'appearance' ? 'appearance' : null;
+  const placeholder = mode === 'theme' ? 'search themes…' : mode === 'appearance' ? 'choose appearance…' : 'search settings and commands…';
 
   if (mode === 'prompt' && promptCmd) {
     const fields = promptCmd.prompt!.fields;
@@ -283,7 +283,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
               {row.tag && <span className="cmd-tag">{row.tag}</span>}
               {row.checked && <span className="cmd-check">●</span>}
             </div>
-          )) : <div className="cmd-empty">No matches</div>}
+          )) : <div className="cmd-empty">no matches</div>}
         </div>
         <div className="cmd-foot">
           <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
