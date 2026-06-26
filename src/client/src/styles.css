@@ -225,6 +225,15 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .sync:disabled { color: var(--faint); }
 .sync .sync-counts { color: var(--cyan); display: inline-flex; gap: 8px; }
 
+/* in-progress merge (conflict resolution), shown in place of the sync button */
+.mergebar { align-items: center; display: inline-flex; gap: 10px; }
+.mergebar .merge-state { color: var(--yellow); }
+.merge-commit { border: 1px solid var(--hairline-2); color: var(--fg); padding: 3px 11px; }
+.merge-commit:hover:not(:disabled) { background: var(--surface); }
+.merge-commit:disabled { color: var(--faint); }
+.merge-abort { background: none; border: none; color: var(--dim); cursor: pointer; font: inherit; }
+.merge-abort:hover:not(:disabled) { color: var(--red); }
+
 .git-tabs { border-bottom: 1px solid var(--hairline); display: flex; gap: 2px; padding: 4px 8px; }
 .gt { color: var(--dim); padding: 2px 12px; }
 .gt.active { background: var(--cyan); color: var(--base); }
@@ -260,7 +269,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .g { flex: none; text-align: center; width: 1ch; }
 .g.new, .g.staged { color: var(--green); }
 .g.modified, .g.mixed { color: var(--yellow); }
-.g.del { color: var(--red); }
+.g.del, .g.conflict { color: var(--red); }
 
 .chg-commitbox { border-top: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; }
 .chg-commitbox textarea { background: var(--base); border: 1px solid var(--hairline); border-radius: 0; color: var(--fg); font: inherit; padding: 5px 7px; resize: vertical; }
@@ -268,6 +277,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .chg-commitbox textarea:focus { border-color: var(--hairline-2); outline: none; }
 .commit-btn { background: var(--cyan); color: var(--base); padding: 6px 0; text-align: center; }
 .commit-btn:hover:not(:disabled) { color: var(--base); filter: brightness(1.08); }
+.chg-commitbox.merging { gap: 0; }
+.merge-hint { color: var(--dim); font-size: 12px; line-height: 1.6; }
+.merge-hint strong { color: var(--fg); font-weight: normal; }
+.merge-hint .g.conflict { display: inline; }
 .commit-btn:disabled { background: var(--surface); color: var(--faint); }
 
 /* diff pane (shared by changes + history) */

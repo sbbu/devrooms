@@ -6,8 +6,8 @@ import './styles.css';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
-type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean };
-type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number }; branches: string[]; head: string };
+type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
+type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string };
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
@@ -54,6 +54,7 @@ function compactProc(count?: ProcessCount) {
 const STATUS_GLYPH: Record<Room['status'], string> = { idle: '●', creating: '◐', error: '✕' };
 
 function fileGutter(file: GitFile): { ch: string; cls: string } {
+  if (file.conflicted) return { ch: '!', cls: 'conflict' };
   if (file.raw.startsWith('??')) return { ch: '?', cls: 'new' };
   if (file.index.trim() && file.workingTree.trim()) return { ch: '±', cls: 'mixed' };
   if (file.index.trim()) return { ch: 'S', cls: 'staged' };
@@ -404,6 +405,7 @@ function AgentGlyph({ state }: { state: RoomState }) {
 
 function ChangesView({ room, status, branch, onCommitted }: { room: Room; status: GitStatus | null; branch: string; onCommitted: () => Promise<void> | void }) {
   const files = status?.status.files ?? [];
+  const merging = status?.status.merging ?? false;
   const [selected, setSelected] = useState<string | null>(null);
   const [diff, setDiff] = useState<FileDiff | null>(null);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
@@ -493,7 +495,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
         <div className="chg-listhead">
           <input ref={masterRef} type="checkbox" className="ck" checked={allIncluded} onChange={toggleAll} disabled={!files.length} />
           <span>{files.length} changed file{files.length === 1 ? '' : 's'}</span>
-          {files.length > 0 && <button className="discard-all" title="discard all uncommitted changes" onClick={discardAll}>discard all</button>}
+          {files.length > 0 && !merging && <button className="discard-all" title="discard all uncommitted changes" onClick={discardAll}>discard all</button>}
         </div>
         <div className="chg-list">
           {files.length ? files.map((file) => {
@@ -503,19 +505,29 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
                 <input type="checkbox" className="ck" checked={!excluded.has(file.path)} onChange={() => toggle(file.path)} onClick={(event) => event.stopPropagation()} />
                 <span className={`g ${gutter.cls}`}>{gutter.ch}</span>
                 <span className="p">{file.path}</span>
-                <button className="discard-file" title="discard changes" onClick={(event) => { event.stopPropagation(); discardFile(file.path); }}>discard</button>
+                {!file.unmerged && <button className="discard-file" title="discard changes" onClick={(event) => { event.stopPropagation(); discardFile(file.path); }}>discard</button>}
               </div>
             );
           }) : <div className="empty clean">no local changes</div>}
         </div>
-        <div className="chg-commitbox">
-          <input value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="summary" />
-          <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="description (optional)" rows={3} />
-          {error && <div className="error inline">{error}</div>}
-          <button className="commit-btn" disabled={committing || !summary.trim() || included.length === 0} onClick={commit}>
-            {committing ? 'committing…' : `commit ${included.length} file${included.length === 1 ? '' : 's'} to ${branch || 'branch'}`}
-          </button>
-        </div>
+        {merging ? (
+          <div className="chg-commitbox merging">
+            <div className="merge-hint">
+              merge in progress. resolve the <span className="g conflict">!</span> files in your editor, then use
+              <strong> commit merge</strong> above. or <strong>abort</strong> to back out.
+            </div>
+            {error && <div className="error inline">{error}</div>}
+          </div>
+        ) : (
+          <div className="chg-commitbox">
+            <input value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="summary" />
+            <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="description (optional)" rows={3} />
+            {error && <div className="error inline">{error}</div>}
+            <button className="commit-btn" disabled={committing || !summary.trim() || included.length === 0} onClick={commit}>
+              {committing ? 'committing…' : `commit ${included.length} file${included.length === 1 ? '' : 's'} to ${branch || 'branch'}`}
+            </button>
+          </div>
+        )}
       </div>
       <div className="diff-pane">
         {selected ? (
@@ -662,6 +674,13 @@ function GitPanel({ room }: { room: Room }) {
         setPushRejected(true);
         setError(null);
         setNote('origin has new commits — pull & merge, then push again');
+      } else if (op === 'pull' && /conflict|automatic merge failed|fix conflicts|unmerged/i.test(message)) {
+        // The merge started but hit conflicts. It's not an error to dead-end on:
+        // refresh reveals the merging state, and the UI switches to resolve/commit.
+        setPushRejected(false);
+        setError(null);
+        setNote('merge conflicts — resolve the ! files, then commit the merge');
+        await refresh();
       } else {
         setError(message);
       }
@@ -674,6 +693,8 @@ function GitPanel({ room }: { room: Room }) {
   const unpushed = status?.status.unpushedCount ?? 0;
   const behind = status?.status.behind ?? 0;
   const hasUpstream = status?.status.hasUpstream ?? false;
+  const merging = status?.status.merging ?? false;
+  const conflicts = (status?.status.files ?? []).filter((file) => file.conflicted).length;
   // One adaptive sync action, in git terms: pull when behind (incl. diverged),
   // otherwise push when there are unpushed commits, otherwise fetch to check.
   // A rejected push (origin ahead) forces pull & merge even when our cached
@@ -687,20 +708,28 @@ function GitPanel({ room }: { room: Room }) {
     : syncVerb === 'pull'
       ? (mergePull ? 'origin has new commits — git pull (merge), then push' : `git pull origin ${branch}`)
       : hasUpstream ? `git push origin ${branch}` : `git push -u origin ${branch} (new branch)`;
-  async function doSync() { setSyncing(true); try { await gitOp(syncOp); } finally { setSyncing(false); } }
+  async function doOp(op: string, body?: unknown) { setSyncing(true); try { await gitOp(op, body); } finally { setSyncing(false); } }
 
   return (
     <div className="git">
       <div className="cmdrow">
-        <button className="sync" disabled={syncing} onClick={doSync} title={syncTitle}>
-          <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
-          {!syncing && (behind > 0 || unpushed > 0) && (
-            <span className="sync-counts">
-              {behind > 0 && <span className="dn">↓{behind}</span>}
-              {unpushed > 0 && <span className="up">↑{unpushed}</span>}
-            </span>
-          )}
-        </button>
+        {merging ? (
+          <span className="mergebar">
+            <span className="merge-state">{conflicts > 0 ? `merging — ${conflicts} conflict${conflicts === 1 ? '' : 's'}` : 'merging — resolved'}</span>
+            <button className="merge-commit" disabled={syncing || conflicts > 0} title="conclude the merge (git commit --no-edit)" onClick={() => doOp('merge-continue')}>commit merge</button>
+            <button className="merge-abort" disabled={syncing} title="discard the merge (git merge --abort)" onClick={() => doOp('merge-abort')}>abort</button>
+          </span>
+        ) : (
+          <button className="sync" disabled={syncing} onClick={() => doOp(syncOp)} title={syncTitle}>
+            <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
+            {!syncing && (behind > 0 || unpushed > 0) && (
+              <span className="sync-counts">
+                {behind > 0 && <span className="dn">↓{behind}</span>}
+                {unpushed > 0 && <span className="up">↑{unpushed}</span>}
+              </span>
+            )}
+          </button>
+        )}
         <span className="branch-sel">
           <span className="lbl">branch</span>
           <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
