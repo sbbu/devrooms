@@ -158,7 +158,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 .room-node { color: var(--dim); }
 .room-node .conn { color: var(--faint); }
-.room-node .rname { color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
+.room-node .rname { color: var(--fg); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.room-node .rhandle { color: var(--faint); flex: none; font-size: 11px; }
 .room-node .kind { color: var(--dim); margin-left: auto; }
 .room-node .count2 { color: var(--yellow); }
 /* per-room git signal: merge conflict (red !), commits to pull (↓) / push (↑) */
@@ -170,6 +171,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .row-sel { background: var(--cyan); color: var(--base); }
 .row-sel .conn,
 .row-sel .rname,
+.row-sel .rhandle,
 .row-sel .kind,
 .row-sel .count2,
 .row-sel .mark,
@@ -224,7 +226,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 /* collapsed state: drop labels, center the glyphs, surface the monogram */
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .kind, .count2, .gitstate, .pname) { display: none; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .rhandle, .kind, .count2, .gitstate, .pname) { display: none; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .mark { display: inline; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .node { gap: 4px; justify-content: center; padding: 4px 0; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .project-node { border-top: 1px solid var(--hairline); } /* restores the grouping the ├/└ gave */
