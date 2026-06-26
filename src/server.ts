@@ -958,6 +958,98 @@ function processCountsByRoom(state: State) {
   return counts;
 }
 
+// --- Derived room labels ----------------------------------------------------
+// A room's typed name goes stale the moment its task finishes, so for display we
+// derive an activity label from cheap signals, task-first:
+//   1. a descriptive (non-default) branch name — the user's own task label
+//   2. the oldest non-merge commit unique to the branch (skips merge noise)
+//   3. a dirty-tree stat — what the room is touching right now
+// Falling through to undefined lets the client show the stable name handle. The
+// git-backed steps are cached briefly so the projects poll stays cheap.
+const LABEL_TTL_MS = 8_000;
+const roomLabelCache = new Map<string, { at: number; label: string | undefined }>();
+
+function deslugBranch(branch: string) {
+  const tail = branch.split('/').pop() ?? branch;       // drop feat/ , user/ … prefixes
+  return tail.replace(/[_-]+/g, ' ').trim();
+}
+
+function cleanSubject(subject: string) {
+  return subject.replace(/^(\w+)(\([^)]*\))?!?:\s*/, '').trim();   // strip conventional-commit prefix
+}
+
+function truncateLabel(value: string, max = 48) {
+  return value.length > max ? `${value.slice(0, max - 1).trimEnd()}…` : value;
+}
+
+// The top-level directory shared by most changed paths, used to give a dirty-tree
+// stat a sense of place ("editing 4 files · src"). Empty when the changes are
+// scattered, so we never imply a focus that isn't there.
+function commonTopDir(paths: string[]) {
+  const counts = new Map<string, number>();
+  for (const candidate of paths) {
+    const slash = candidate.indexOf('/');
+    if (slash > 0) counts.set(candidate.slice(0, slash), (counts.get(candidate.slice(0, slash)) ?? 0) + 1);
+  }
+  let dir = '';
+  let best = 0;
+  for (const [name, n] of counts) if (n > best) { dir = name; best = n; }
+  return best >= Math.ceil(paths.length / 2) ? dir : '';
+}
+
+async function gitRoomLabel(room: Room, base?: string): Promise<string | undefined> {
+  // The oldest commit unique to this branch names the task it was created for,
+  // with merges excluded so a "Merge branch 'main'" subject can never win.
+  if (base && room.branch && room.branch !== base) {
+    const log = await run('git', ['log', '--no-merges', '--format=%s', `${base}..HEAD`], room.path, { timeoutMs: 5_000 }).catch(() => undefined);
+    if (log?.exitCode === 0) {
+      const subjects = log.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+      const oldest = subjects[subjects.length - 1];
+      if (oldest) { const subject = cleanSubject(oldest); if (subject) return truncateLabel(subject); }
+    }
+  }
+  // Otherwise describe what the room is actively touching.
+  // -uall lists files inside new directories individually (porcelain otherwise
+  // collapses an untracked dir to one entry), so the count reflects real files.
+  const status = await run('git', ['status', '--porcelain', '-uall'], room.path, { timeoutMs: 5_000 }).catch(() => undefined);
+  if (status?.exitCode === 0) {
+    const files = status.stdout.split('\n')
+      .map((line) => line.slice(3))
+      .map((entry) => (entry.includes(' -> ') ? entry.slice(entry.indexOf(' -> ') + 4) : entry))   // unwrap renames
+      .filter(Boolean);
+    if (files.length) {
+      const dir = commonTopDir(files);
+      return `editing ${files.length} file${files.length === 1 ? '' : 's'}${dir ? ` · ${dir}` : ''}`;
+    }
+  }
+  return undefined;
+}
+
+async function deriveRoomLabel(room: Room, project: Project | undefined): Promise<string | undefined> {
+  // The main room is the repo itself — its name ("main") is already its identity.
+  if (room.kind === 'main') return undefined;
+  const base = project?.defaultBranch;
+  if (room.branch && base && room.branch !== base) {
+    const label = deslugBranch(room.branch);
+    if (label) return label;
+  }
+  // Only spend git reads on settled rooms, and only as often as the TTL.
+  if (room.status !== 'idle') return undefined;
+  const cached = roomLabelCache.get(room.id);
+  if (cached && Date.now() - cached.at < LABEL_TTL_MS) return cached.label;
+  const label = await gitRoomLabel(room, base);
+  roomLabelCache.set(room.id, { at: Date.now(), label });
+  return label;
+}
+
+// Rooms as sent to the client: the stored record plus a derived activity label.
+async function roomViews(state: State, rooms: Room[]) {
+  return Promise.all(rooms.map(async (room) => {
+    const label = await deriveRoomLabel(room, state.projects[room.projectId]).catch(() => undefined);
+    return label ? { ...room, label } : room;
+  }));
+}
+
 function metaSummary(state: State) {
   return {
     name: APP_NAME,
@@ -1186,7 +1278,7 @@ async function main() {
 
   app.get('/api/projects', async (_req, res) => {
     const state = await getState();
-    res.json({ projects: Object.values(state.projects), rooms: Object.values(state.rooms), processCounts: processCountsByRoom(state) });
+    res.json({ projects: Object.values(state.projects), rooms: await roomViews(state, Object.values(state.rooms)), processCounts: processCountsByRoom(state) });
   });
 
   app.post('/api/projects', async (req, res) => {
@@ -1201,7 +1293,7 @@ async function main() {
     try {
       const state = await getState();
       getProject(state, req.params.projectId);
-      res.json({ rooms: Object.values(state.rooms).filter((room) => room.projectId === req.params.projectId) });
+      res.json({ rooms: await roomViews(state, Object.values(state.rooms).filter((room) => room.projectId === req.params.projectId)) });
     } catch (error) {
       apiError(error, res);
     }

@@ -7,7 +7,7 @@ import { CommandPalette, type Command } from './CommandPalette';
 import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
-type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
+type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[]; label?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
@@ -1135,12 +1135,16 @@ export function App() {
                       const pc = processCounts[room.id];
                       const procLabel = compactProc(pc);
                       const mark = room.kind === 'main' ? room.name.charAt(0).toUpperCase() : room.name.charAt(0).toLowerCase();
+                      // Lead with the derived activity label; the typed name stays the
+                      // stable handle (shown muted alongside, and in the tooltip).
+                      const display = room.label ?? room.name;
+                      const meta = `${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`;
                       return (
                         <button
                           key={room.id}
                           className={selectedRoom?.id === room.id ? 'node room-node row-sel' : 'node room-node'}
-                          aria-label={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
-                          title={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
+                          aria-label={`${display}${room.label ? ` (${room.name})` : ''} · ${meta}`}
+                          title={`${display}${room.label ? ` (${room.name})` : ''} · ${meta}`}
                           data-proc={pc?.running ? 'run' : pc?.lost ? 'lost' : undefined}
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
@@ -1148,7 +1152,8 @@ export function App() {
                           {room.status === 'idle'
                             ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
-                          <span className="rname">{room.name}</span>
+                          <span className="rname">{display}</span>
+                          {room.label && <span className="rhandle">{room.name}</span>}
                           <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
                           {procLabel && <span className="count2">{procLabel}</span>}
                           <span className="mark" aria-hidden="true">{mark}</span>
@@ -1178,7 +1183,7 @@ export function App() {
         <section className="ws">
           <div className="ws-head">
             <div className="ws-title">
-              <span className="rname">{selectedRoom ? selectedRoom.name : 'no room selected'}</span>
+              <span className="rname">{selectedRoom ? (selectedRoom.label ?? selectedRoom.name) : 'no room selected'}</span>
               <span className="rpath">{selectedRoom ? shortPath(selectedRoom.path) : 'create a project or clone a room to begin'}</span>
             </div>
             <div className="tabs">
