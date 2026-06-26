@@ -199,7 +199,7 @@ function DiffView({ text, path }: { text: string; path?: string }) {
           <span className="ln">{row.oldNo ?? ''}</span>
           <span className="ln">{row.newNo ?? ''}</span>
           {row.type === 'add' || row.type === 'del' || row.type === 'ctx'
-            ? <span className="dc"><span className="dpfx">{row.text.slice(0, 1) || ' '}</span>{highlightCode(row.text.slice(1))}</span>
+            ? <span className="dc"><span className="dpfx">{row.text.slice(0, 1) || ' '}</span>{highlightCode(row.text.slice(1), row.lang ?? fallbackLang)}</span>
             : <span className="dc">{row.text === '' ? ' ' : row.text}</span>}
         </div>
       ))}
