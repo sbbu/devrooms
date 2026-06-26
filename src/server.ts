@@ -246,7 +246,13 @@ function run(command: string, args: string[], cwd: string, opts: { onChild?: (ch
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      // GIT_OPTIONAL_LOCKS=0 stops read-only git commands from taking .git/index.lock
+      // to refresh the index as a side effect. The daemon polls `git status` (summary,
+      // the changes panel, label derivation) every few seconds; without this, a poll can
+      // hold the lock exactly when a user merge/commit/checkout tries to write the index,
+      // which fails with "unable to write index". Operations that *require* the lock
+      // (merge/commit/add themselves) still take it — only the optional refresh is skipped.
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     opts.onChild?.(child);
