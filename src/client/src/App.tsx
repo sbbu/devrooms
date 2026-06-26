@@ -668,9 +668,15 @@ function GitPanel({ room }: { room: Room }) {
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // Clone room whose origin is a local repo with no real remote: git refuses to push
+      // the branch checked out there. pull & merge can't fix it — say so plainly.
+      if (op === 'push' && /checked out branch|denyCurrentBranch/i.test(message)) {
+        setPushRejected(false);
+        setError(null);
+        setNote('cannot push: that branch is checked out in the repo this room was cloned from. work on a room branch, or give the project a remote.');
       // Non-fast-forward push: origin moved on. Flip the button to pull & merge
       // (GitHub Desktop style) — pull merges, then the merge can be pushed.
-      if (op === 'push' && /rejected|fetch first|non-fast-forward|failed to push/i.test(message)) {
+      } else if (op === 'push' && /rejected|fetch first|non-fast-forward|failed to push/i.test(message)) {
         setPushRejected(true);
         setError(null);
         setNote('origin has new commits — pull & merge, then push again');

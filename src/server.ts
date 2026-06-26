@@ -615,6 +615,42 @@ async function createRoom(projectId: string, body: unknown) {
   return room;
 }
 
+// A clone room is created with `git clone <project.repoUrl> …`. For a folder-picked
+// project repoUrl is a local path, so the clone's origin is the user's own non-bare
+// repo — which refuses `git push` to whatever branch is checked out there. Repoint
+// origin at that local repo's OWN upstream (the real remote) so a clone behaves like a
+// normal clone: push/pull hit a bare remote, divergence flows through pull & merge.
+async function isLocalRepoPath(repoUrl: string): Promise<boolean> {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(repoUrl)) return false; // https:// ssh:// git:// file://
+  if (/^[^/\\]+@[^/\\]+:/.test(repoUrl)) return false;        // scp-like git@host:path
+  try { return (await fs.stat(repoUrl)).isDirectory(); } catch { return false; }
+}
+
+async function remoteUrl(repoPath: string, remote = 'origin'): Promise<string | null> {
+  const result = await run('git', ['remote', 'get-url', remote], repoPath);
+  const url = result.exitCode === 0 ? result.stdout.trim() : '';
+  return url || null;
+}
+
+// A push target is safe unless it's a local NON-bare repo: only those refuse a push to
+// their checked-out branch. Remote URLs and local bare repos accept pushes fine.
+async function isPushableTarget(url: string): Promise<boolean> {
+  if (!(await isLocalRepoPath(url))) return true;
+  const result = await run('git', ['rev-parse', '--is-bare-repository'], url);
+  return result.exitCode === 0 && result.stdout.trim() === 'true';
+}
+
+// Idempotent. No-op once origin is already pushable, or when the local source has no
+// usable upstream of its own (then we keep the local origin as a fallback).
+async function ensureCloneRemote(room: Room): Promise<void> {
+  if (room.kind !== 'clone') return;
+  const origin = await remoteUrl(room.path);
+  if (!origin || (await isPushableTarget(origin))) return;
+  const upstream = await remoteUrl(origin);
+  if (!upstream || upstream === origin || !(await isPushableTarget(upstream))) return;
+  await run('git', ['remote', 'set-url', 'origin', upstream], room.path);
+}
+
 async function materializeRoom(project: Project, room: Room) {
   try {
     await fs.mkdir(path.dirname(room.path), { recursive: true });
@@ -624,6 +660,9 @@ async function materializeRoom(project: Project, room: Room) {
       timeoutMs: 15 * 60_000,
     });
     if (clone.exitCode !== 0) throw new Error(clone.stderr || clone.stdout || 'git clone failed');
+    // Folder-picked projects clone from a local path; point origin at the real remote.
+    await ensureCloneRemote(room).catch((error) => console.error('clone remote repoint failed', error));
+    await run('git', ['fetch', 'origin', '--prune'], room.path).catch(() => { /* offline: keep local refs */ });
     room.status = 'idle';
     room.updatedAt = now();
   } catch (error) {
@@ -1222,6 +1261,9 @@ async function main() {
       const state = await getState();
       const room = getRoom(state, req.params.roomId);
       const op = req.params.op;
+      // Before anything that talks to the remote, make sure a clone room points at the
+      // real upstream rather than the local repo it was cloned from (fixes old rooms too).
+      if (op === 'fetch' || op === 'pull' || op === 'push') await ensureCloneRemote(room);
       let result: RunResult;
       if (op === 'stage') {
         const file = requireString(req.body?.path, 'path');
