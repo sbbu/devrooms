@@ -392,10 +392,10 @@ function RoomTerminals({ room, onClose }: { room: Room; onClose: (terminalId: st
       {tileRows(terminals).map((rowItems, r) => (
         <div className="trow" key={r}>
           {rowItems.map((tid) => (
-            <div className="tpane" key={tid}>
+            <div className="tpane" key={tid} data-terminal={tid}>
               <div className="tpane-head">
                 <span className="tlabel">{tid === 'main' ? 'main' : `term ${terminals.indexOf(tid) + 1}`}</span>
-                {tid !== 'main' && <button className="tpane-x" title="close terminal" onClick={() => onClose(tid)}>×</button>}
+                {tid !== 'main' && <button className="tpane-x" title={`close terminal (${MOD_KEY}W)`} onClick={() => onClose(tid)}>×</button>}
               </div>
               <TerminalPane roomId={room.id} terminalId={tid} />
             </div>
@@ -1233,11 +1233,16 @@ export function App() {
     finally { setBusy(false); }
   }
 
-  async function closeTerminal(terminalId: string) {
+  async function closeTerminal(terminalId: string, force = false) {
     if (!selectedRoom) return;
     setError(null);
     try {
-      await api(`/api/rooms/${selectedRoom.id}/terminals/${terminalId}`, { method: 'DELETE' });
+      const res = await api<{ ok: boolean; busy?: boolean; proc?: string }>(`/api/rooms/${selectedRoom.id}/terminals/${terminalId}${force ? '?force=1' : ''}`, { method: 'DELETE' });
+      // The server refuses if the terminal is running something — confirm, then force.
+      if (res.busy) {
+        if (window.confirm(`"${res.proc}" is still running in this terminal — close it anyway?`)) await closeTerminal(terminalId, true);
+        return;
+      }
       disposeTerminalResource(`room:${selectedRoom.id}:${terminalId}`);
       await refresh();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -1320,6 +1325,14 @@ export function App() {
       case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { if (miniRail && !forcedMini) expandRail(); setShowNewRoom(true); } });
       case 'KeyT': if (!shift && selectedRoom?.status === 'idle' && terminalCount < 6) return hit(() => { setTab('terminal'); void addTerminal(); }); return;
       case 'KeyS': if (!shift && selectedRoom?.status === 'idle' && !git.merging) return hit(() => { void git.doOp(git.syncOp); }); return;
+      case 'KeyW': {
+        if (shift) return;
+        // Close the focused terminal tile (the main one is the room's shell, not
+        // closeable). closeTerminal guards against killing something that's running.
+        const tid = (document.activeElement as HTMLElement | null)?.closest('[data-terminal]')?.getAttribute('data-terminal');
+        if (tid && tid !== 'main') return hit(() => { void closeTerminal(tid); });
+        return;
+      }
     }
     if ((event.key === 'Backspace' || event.key === 'Delete') && !shift && !inRealInput && selectedRoom) hit(() => { void deleteSelectedRoom(); });
   };

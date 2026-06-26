@@ -27,6 +27,7 @@ type Session = {
   exitedAt?: string;
   cols: number;
   rows: number;
+  shell: string;               // basename of the spawn shell, to tell "idle shell" from "running something"
   // Activity tracking for the sidebar "needs attention vs thinking" indicator.
   lastOutputMs: number;        // wall-clock of the most recent output byte
   attentionMs: number;         // last generic notification (OSC 9 / OSC 777)
@@ -75,7 +76,7 @@ function spawnSession(key: string, args: string[], opts: { cwd: string; env: Rec
   const rows = opts.rows ?? 36;
   const shell = opts.env.SHELL || process.env.SHELL || '/bin/zsh';
   const child = pty.spawn(shell, args, { name: 'xterm-256color', cols, rows, cwd: opts.cwd, env: opts.env });
-  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows, lastOutputMs: Date.now(), attentionMs: 0, agentStateMs: 0, scanCarry: '' };
+  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows, shell: shell.split('/').pop() || shell, lastOutputMs: Date.now(), attentionMs: 0, agentStateMs: 0, scanCarry: '' };
   child.onData((data) => { appendLog(session.log, data); scanActivity(session, data); });
   child.onExit(({ exitCode }) => {
     session.status = 'exited';
@@ -129,7 +130,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/kill') {
       const body = await readBody(req);
       const key = typeof body.key === 'string' ? body.key : '';
+      // Default to an unconditional kill (room delete, subagent stop). Only an explicit
+      // force:false opts into the "busy?" guard used by the terminal-close UX: refuse
+      // if the tty's foreground process isn't just the idle shell.
+      const force = body.force !== false;
       const session = key ? sessions.get(key) : undefined;
+      if (session && session.status === 'running' && !force) {
+        const proc = (session.pty.process || '').replace(/^-/, ''); // login shells report as "-zsh"
+        if (proc && proc !== session.shell) return sendJson(res, 200, { ok: false, busy: true, proc });
+      }
       if (session) { if (session.status === 'running') session.pty.kill(); sessions.delete(key); }
       return sendJson(res, 200, { ok: true });
     }

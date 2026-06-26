@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu } from 'electron';
 import path from 'node:path';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -136,7 +136,22 @@ ipcMain.handle('dialog:openDirectory', async (event) => {
   return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
 });
 
+// macOS only: replace the default menu with one that drops the Window ▸ Close
+// (⌘W) item, freeing ⌘W for the renderer to close the focused terminal (iTerm
+// style). Keeps the standard app/edit/view roles (⌘Q, clipboard, reload, etc.).
+// Other platforms keep their default menu.
+function installAppMenu() {
+  if (process.platform !== 'darwin') return;
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { role: 'appMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
+  ]));
+}
+
 app.whenReady().then(() => {
+  installAppMenu();
   void createWindow().catch((error) => {
     console.error(error);
     app.quit();

@@ -865,8 +865,8 @@ async function installAgentStatusHooks(room: Room) {
   }
 }
 
-async function killRoomTerminal(roomId: string, terminalId = 'main') {
-  await ptyHostKill(roomTerminalKey(roomId, terminalId));
+async function killRoomTerminal(roomId: string, terminalId = 'main', force = true) {
+  return ptyHostKill(roomTerminalKey(roomId, terminalId), force);
 }
 
 async function killAllRoomTerminals(room: Room) {
@@ -1227,11 +1227,12 @@ async function ptyHostSpawn(key: string, opts: { kind?: 'process'; command?: str
   }, 5000);
 }
 
-async function ptyHostKill(key: string) {
+async function ptyHostKill(key: string, force = true): Promise<{ busy?: boolean; proc?: string }> {
   try {
-    await ptyHostFetch('/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) }, 2000);
+    const res = await ptyHostFetch('/kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, force }) }, 2000);
+    return (await res.json().catch(() => ({}))) as { busy?: boolean; proc?: string };
   } catch {
-    // host may be down; nothing to do
+    return {}; // host may be down; nothing to kill
   }
 }
 
@@ -1647,7 +1648,11 @@ async function main() {
       const room = getRoom(state, req.params.roomId);
       const terminalId = req.params.terminalId;
       if (terminalId === 'main') throw new HttpError(400, 'the main terminal cannot be closed');
-      await killRoomTerminal(room.id, terminalId);
+      // Guard by default: refuse if the terminal is running something (foreground proc
+      // isn't the idle shell). ?force=1 skips the guard once the user confirms.
+      const force = req.query.force === '1';
+      const result = await killRoomTerminal(room.id, terminalId, force);
+      if (result?.busy) { res.json({ ok: false, busy: true, proc: result.proc }); return; }
       room.terminals = roomTerminalIds(room).filter((id) => id !== terminalId);
       room.updatedAt = now();
       await saveState(state);
