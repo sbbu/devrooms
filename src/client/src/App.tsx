@@ -1427,7 +1427,6 @@ export function App() {
                 {tab === 'terminal' && selectedRoom?.status === 'idle' && (
                   <button onClick={addTerminal} disabled={busy || terminalCount >= 6} title={`add a tiled terminal (${MOD_KEY}T)`}>+ term<span className="kbd-hint">{MOD_KEY}T</span></button>
                 )}
-                <button onClick={() => refresh()} title="reload projects and rooms">refresh</button>
                 {selectedRoom && <button className="danger" onClick={deleteSelectedRoom} title={`delete this room (${MOD_DEL})`}>delete<span className="kbd-hint">{MOD_DEL}</span></button>}
               </span>
             </div>
