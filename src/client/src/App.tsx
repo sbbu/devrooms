@@ -10,6 +10,8 @@ type Project = { id: string; name: string; repoUrl: string; rootPath?: string; d
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
+type GitSummary = { behind: number; unpushed: number; conflict: boolean };
+type GitSummaries = Record<string, GitSummary>;
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
@@ -677,6 +679,7 @@ function GitPanel({ room }: { room: Room }) {
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
       setPushRejected(false);
       await refresh();
+      window.dispatchEvent(new Event('devrooms:git')); // nudge the sidebar icons to re-poll now
       setReloadKey((value) => value + 1); // re-fetch history so ↑ markers update
       return true;
     } catch (err) {
@@ -686,6 +689,7 @@ function GitPanel({ room }: { room: Room }) {
       // rather than parsing the error text — a conflicted `git pull` reports its fetch
       // summary on stderr and the "CONFLICT" lines on stdout, so the message alone lies.
       const next = await refresh();
+      window.dispatchEvent(new Event('devrooms:git')); // a failed op can still change state (e.g. conflict) — refresh icons
       if (next?.status.merging) {
         // The merge started but hit conflicts — switch straight to the resolve/commit UI.
         setPushRejected(false);
@@ -852,6 +856,7 @@ export function App() {
   const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [processCounts, setProcessCounts] = useState<ProcessCounts>({});
+  const [gitSummary, setGitSummary] = useState<GitSummaries>({});
   const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
@@ -978,6 +983,24 @@ export function App() {
   }, [selectedRoomId]);
 
   useEffect(() => { if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now(); }, [selectedRoomId]);
+
+  // Poll per-room git state for the sidebar icons (commits to pull/push, merge
+  // conflict). Sparse map — only rooms with something to show. "behind" reflects
+  // the last fetch; push/conflict are always live from local state.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const data = await api<{ summary: GitSummaries }>('/api/git/summary');
+        if (alive) setGitSummary(data.summary ?? {});
+      } catch { /* host may be momentarily unreachable */ }
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    // A git op in the panel fires this so the sidebar updates at once, not in ≤5s.
+    window.addEventListener('devrooms:git', poll);
+    return () => { alive = false; clearInterval(timer); window.removeEventListener('devrooms:git', poll); };
+  }, []);
 
   async function refreshRoomProcesses(roomId: string) {
     const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
@@ -1123,12 +1146,15 @@ export function App() {
                       const pc = processCounts[room.id];
                       const procLabel = compactProc(pc);
                       const mark = room.kind === 'main' ? room.name.charAt(0).toUpperCase() : room.name.charAt(0).toLowerCase();
+                      const gs = gitSummary[room.id];
+                      const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
+                      const label = `${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
                       return (
                         <button
                           key={room.id}
                           className={selectedRoom?.id === room.id ? 'node room-node row-sel' : 'node room-node'}
-                          aria-label={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
-                          title={`${room.name} · ${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}`}
+                          aria-label={label}
+                          title={label}
                           data-proc={pc?.running ? 'run' : pc?.lost ? 'lost' : undefined}
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
@@ -1137,6 +1163,13 @@ export function App() {
                             ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
                           <span className="rname">{room.name}</span>
+                          {gs && (gs.conflict || gs.behind > 0 || gs.unpushed > 0) && (
+                            <span className="gitstate" aria-hidden="true">
+                              {gs.conflict && <span className="gs-conflict" title="merge conflict">!</span>}
+                              {gs.behind > 0 && <span className="gs-pull" title={`${gs.behind} to pull`}>↓{gs.behind}</span>}
+                              {gs.unpushed > 0 && <span className="gs-push" title={`${gs.unpushed} to push`}>↑{gs.unpushed}</span>}
+                            </span>
+                          )}
                           <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
                           {procLabel && <span className="count2">{procLabel}</span>}
                           <span className="mark" aria-hidden="true">{mark}</span>
