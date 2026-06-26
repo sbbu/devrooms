@@ -401,18 +401,38 @@ function parseStatus(raw: string) {
   const branch = branchLine.replace(/^## /, '');
   const files = lines
     .filter((line) => !line.startsWith('## '))
-    .map((line) => ({
-      index: line.slice(0, 1),
-      workingTree: line.slice(1, 2),
-      path: line.slice(3),
-      raw: line,
-      staged: line.slice(0, 1) !== ' ' && line.slice(0, 1) !== '?',
-      dirty: line.slice(1, 2) !== ' ' || line.startsWith('??'),
-    }));
+    .map((line) => {
+      const x = line.slice(0, 1);
+      const y = line.slice(1, 2);
+      const xy = line.slice(0, 2);
+      return {
+        index: x,
+        workingTree: y,
+        path: line.slice(3),
+        raw: line,
+        staged: x !== ' ' && x !== '?',
+        dirty: y !== ' ' || line.startsWith('??'),
+        // Unmerged paths from a conflicted merge: any U, or both sides added/deleted.
+        // `conflicted` (still has markers) is refined by the status endpoint.
+        unmerged: x === 'U' || y === 'U' || xy === 'AA' || xy === 'DD',
+        conflicted: false,
+      };
+    });
   const ahead = Number(/\bahead (\d+)/.exec(branch)?.[1] ?? 0);
   const behind = Number(/\bbehind (\d+)/.exec(branch)?.[1] ?? 0);
   const hasUpstream = branch.includes('...');
   return { branch, files, raw, dirtyCount: files.length, ahead, behind, hasUpstream };
+}
+
+// A file is still in conflict while it carries both the opening and closing merge
+// markers git writes. Requiring both avoids false positives from a lone `=======`.
+async function hasConflictMarkers(absPath: string): Promise<boolean> {
+  try {
+    const text = await fs.readFile(absPath, 'utf8');
+    return /^<{7}[ \t]/m.test(text) && /^>{7}[ \t]/m.test(text);
+  } catch {
+    return false; // gone (e.g. delete/delete) — nothing to resolve in-file
+  }
 }
 
 async function listBranches(room: Room) {
@@ -1115,7 +1135,18 @@ async function main() {
       // when the branch has no tracking upstream (where status's ahead count is 0).
       const unpushed = await runGit(room, ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin']).catch(() => null);
       const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
-      res.json({ status: { ...parseStatus(status.stdout), unpushedCount }, branches: await listBranches(room), head: head.stdout.trim() });
+      // A conflicted `pull` leaves MERGE_HEAD behind: the merge is in progress and
+      // must be resolved+committed (or aborted) before push/pull can proceed.
+      const merging = (await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode === 0;
+      const parsed = parseStatus(status.stdout);
+      // Mark a file as still-conflicted only while conflict markers remain in it, so
+      // "commit merge" lights up once the user has resolved them (even before staging).
+      if (merging) {
+        await Promise.all(parsed.files.filter((file) => file.unmerged).map(async (file) => {
+          file.conflicted = await hasConflictMarkers(path.join(room.path, file.path));
+        }));
+      }
+      res.json({ status: { ...parsed, unpushedCount, merging }, branches: await listBranches(room), head: head.stdout.trim() });
     } catch (error) {
       apiError(error, res);
     }
@@ -1244,6 +1275,20 @@ async function main() {
         // Revert all tracked changes and remove every untracked file (destructive).
         await run('git', ['reset', '--hard', 'HEAD'], room.path); // best-effort: errors only in a commit-less repo
         result = await runGit(room, ['clean', '-fd']);
+      } else if (op === 'merge-abort') {
+        // Throw away the in-progress merge, returning to the pre-pull state.
+        result = await runGit(room, ['merge', '--abort']);
+      } else if (op === 'merge-continue') {
+        // Conclude a conflicted merge: refuse while any file still has conflict
+        // markers (resolved-but-unstaged is fine), then stage the resolved tracked
+        // files and commit with the prepared merge message.
+        if ((await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode !== 0) throw new HttpError(409, 'no merge in progress');
+        const unmerged = (await run('git', ['diff', '--name-only', '--diff-filter=U'], room.path)).stdout.split('\n').filter(Boolean);
+        const unresolved: string[] = [];
+        for (const file of unmerged) if (await hasConflictMarkers(path.join(room.path, file))) unresolved.push(file);
+        if (unresolved.length) throw new HttpError(409, `unresolved conflict markers in: ${unresolved.join(', ')}`);
+        await runGit(room, ['add', '-u']);
+        result = await runGit(room, ['commit', '--no-edit']);
       } else {
         throw new HttpError(404, `unknown git operation: ${op}`);
       }
