@@ -650,41 +650,41 @@ function HistoryView({ room, reloadKey }: { room: Room; reloadKey: number }) {
   );
 }
 
-function GitPanel({ room }: { room: Room }) {
-  const [view, setView] = useState<'changes' | 'history'>('changes');
+// Git state + operations for one room, lifted out of the panel so the branch
+// toolbar can live in the workspace header (visible on every tab) while the
+// changes/history panel shares the exact same status — one fetch, one source of
+// truth. Polls whenever a room is selected; resets on room change.
+function useGitRoom(room: Room | null) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState('');
-  const [newBranch, setNewBranch] = useState('');
   const [syncing, setSyncing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [pushRejected, setPushRejected] = useState(false);
+  const roomId = room?.id ?? null;
 
-  async function refresh(): Promise<GitStatus | null> {
-    try { const next = await api<GitStatus>(`/api/rooms/${room.id}/git/status`); setStatus(next); setError(null); return next; }
+  const refresh = useCallback(async (): Promise<GitStatus | null> => {
+    if (!roomId) { setStatus(null); return null; }
+    try { const next = await api<GitStatus>(`/api/rooms/${roomId}/git/status`); setStatus(next); setError(null); return next; }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); return null; }
-  }
-  // On opening the git tab (GitPanel mounts fresh each time) or switching rooms,
-  // pick the default view from the freshly-fetched status: history when there's
-  // nothing to manage — no uncommitted changes and no merge in progress — else
-  // changes. Only runs on room change/mount, so manual tab switches stick.
+  }, [roomId]);
+
+  // Reset transient state and refetch on room change (clearing status first so the
+  // header never flashes the previous room's branch).
+  useEffect(() => { setPushRejected(false); setNote(''); setError(null); setStatus(null); refresh(); }, [roomId, refresh]);
   useEffect(() => {
-    setPushRejected(false);
-    refresh().then((next) => {
-      if (next) setView(next.status.files.length === 0 && !next.status.merging ? 'history' : 'changes');
-    });
-  }, [room.id]);
-  useEffect(() => {
+    if (!roomId) return undefined;
     const onFocus = () => { refresh(); };
     window.addEventListener('focus', onFocus);
-    const timer = view === 'changes' ? window.setInterval(() => { refresh(); }, 4000) : undefined;
-    return () => { window.removeEventListener('focus', onFocus); if (timer) window.clearInterval(timer); };
-  }, [room.id, view]);
+    const timer = window.setInterval(() => { refresh(); }, 4000);
+    return () => { window.removeEventListener('focus', onFocus); window.clearInterval(timer); };
+  }, [roomId, refresh]);
 
-  async function gitOp(op: string, body?: unknown) {
+  const gitOp = useCallback(async (op: string, body?: unknown) => {
+    if (!roomId) return false;
     setError(null);
     try {
-      const result = await api<{ stdout: string; stderr: string }>(`/api/rooms/${room.id}/git/${op}`, { method: 'POST', body: JSON.stringify(body ?? {}) });
+      const result = await api<{ stdout: string; stderr: string }>(`/api/rooms/${roomId}/git/${op}`, { method: 'POST', body: JSON.stringify(body ?? {}) });
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
       setPushRejected(false);
       await refresh();
@@ -726,9 +726,11 @@ function GitPanel({ room }: { room: Room }) {
       }
       return false;
     }
-  }
+  }, [roomId, refresh]);
 
-  const branch = status?.status.branch.split('...')[0] ?? room.branch ?? '';
+  const doOp = useCallback(async (op: string, body?: unknown) => { setSyncing(true); try { await gitOp(op, body); } finally { setSyncing(false); } }, [gitOp]);
+
+  const branch = status?.status.branch.split('...')[0] ?? room?.branch ?? '';
   const changeCount = status?.status.files.length ?? 0;
   const unpushed = status?.status.unpushedCount ?? 0;
   const behind = status?.status.behind ?? 0;
@@ -742,18 +744,26 @@ function GitPanel({ room }: { room: Room }) {
   // A rejected push (origin ahead) forces pull & merge even when our cached
   // behind-count is stale — we haven't fetched since origin moved on.
   const mergePull = pushRejected || (behind > 0 && unpushed > 0);
-  const syncVerb = (behind > 0 || pushRejected) ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
-  const syncOp = syncVerb;
-  const syncLabel = syncVerb === 'fetch' ? '⟳ fetch' : syncVerb === 'pull' ? (mergePull ? 'pull & merge' : 'pull') : 'push';
-  const syncTitle = syncVerb === 'fetch'
+  const syncOp = (behind > 0 || pushRejected) ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
+  const syncLabel = syncOp === 'fetch' ? '⟳ fetch' : syncOp === 'pull' ? (mergePull ? 'pull & merge' : 'pull') : 'push';
+  const syncTitle = syncOp === 'fetch'
     ? 'git fetch --all --prune'
-    : syncVerb === 'pull'
+    : syncOp === 'pull'
       ? (mergePull ? 'origin has new commits — git pull (merge), then push' : `git pull origin ${branch}`)
       : hasUpstream ? `git push origin ${branch}` : `git push -u origin ${branch} (new branch)`;
-  async function doOp(op: string, body?: unknown) { setSyncing(true); try { await gitOp(op, body); } finally { setSyncing(false); } }
 
+  return { status, error, note, setNote, syncing, reloadKey, refresh, gitOp, doOp, branch, changeCount, unpushed, behind, merging, conflicts, otherBranches, gitError, syncOp, syncLabel, syncTitle };
+}
+
+type GitRoom = ReturnType<typeof useGitRoom>;
+
+// The branch / sync / merge toolbar. Lives in the workspace header so it's
+// available on every tab (terminal, git, subagents), not just the git tab.
+function GitBar({ git }: { git: GitRoom }) {
+  const [newBranch, setNewBranch] = useState('');
+  const { branch, otherBranches, merging, conflicts, syncing, syncOp, syncLabel, syncTitle, behind, unpushed, doOp, gitOp } = git;
   return (
-    <div className="git">
+    <>
       <div className="cmdrow">
         {merging ? (
           <span className="mergebar">
@@ -775,7 +785,7 @@ function GitPanel({ room }: { room: Room }) {
         <span className="branch-sel">
           <span className="lbl">branch</span>
           <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
-            {(status?.branches ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
+            {(git.status?.branches ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
           </select>
           {!merging && otherBranches.length > 0 && (
             // Action menu: stays on "merge…"; picking a branch merges it into the current one.
@@ -789,16 +799,33 @@ function GitPanel({ room }: { room: Room }) {
           <button disabled={!newBranch.trim()} onClick={() => gitOp('checkout-new', { branch: newBranch.trim() }).then((ok) => { if (ok) setNewBranch(''); })}>create</button>
         </span>
       </div>
+      {git.error && <div className="error">{git.error}</div>}
+      {git.gitError && <div className="error">git unavailable: {git.gitError}</div>}
+      {git.note && <div className="gitnote" onClick={() => git.setNote('')}>{git.note}</div>}
+    </>
+  );
+}
+
+function GitPanel({ room, git }: { room: Room; git: GitRoom }) {
+  const [view, setView] = useState<'changes' | 'history'>('changes');
+  // On opening the git tab (GitPanel mounts fresh each time) or switching rooms,
+  // pick the default view from the freshly-fetched status: history when there's
+  // nothing to manage — no uncommitted changes and no merge in progress — else
+  // changes. Only runs on room change/mount, so manual tab switches stick.
+  useEffect(() => {
+    git.refresh().then((next) => {
+      if (next) setView(next.status.files.length === 0 && !next.status.merging ? 'history' : 'changes');
+    });
+  }, [room.id, git.refresh]);
+  return (
+    <div className="git">
       <div className="git-tabs">
-        <button className={view === 'changes' ? 'gt active' : 'gt'} onClick={() => setView('changes')}>changes{changeCount ? ` ${changeCount}` : ''}</button>
+        <button className={view === 'changes' ? 'gt active' : 'gt'} onClick={() => setView('changes')}>changes{git.changeCount ? ` ${git.changeCount}` : ''}</button>
         <button className={view === 'history' ? 'gt active' : 'gt'} onClick={() => setView('history')}>history</button>
       </div>
-      {error && <div className="error">{error}</div>}
-      {gitError && <div className="error">git unavailable: {gitError}</div>}
       {view === 'changes'
-        ? <ChangesView room={room} status={status} branch={branch} onCommitted={() => { refresh(); }} />
-        : <HistoryView room={room} reloadKey={reloadKey} />}
-      {note && <div className="gitnote" onClick={() => setNote('')}>{note}</div>}
+        ? <ChangesView room={room} status={git.status} branch={git.branch} onCommitted={() => { git.refresh(); }} />
+        : <HistoryView room={room} reloadKey={git.reloadKey} />}
     </div>
   );
 }
@@ -911,6 +938,9 @@ export function App() {
 
   const selectedProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? projects[0], [projects, selectedProjectId]);
   const selectedRoom = useMemo(() => rooms.find((room) => room.id === selectedRoomId), [rooms, selectedRoomId]);
+  // Git state for the selected (ready) room — drives the branch toolbar in the
+  // workspace header and the git panel below it from one shared source.
+  const git = useGitRoom(selectedRoom?.status === 'idle' ? selectedRoom : null);
   const runningCount = roomProcesses.filter((proc) => proc.status === 'running').length;
 
   // Effective collapse = user intent OR a too-narrow viewport. The width override
@@ -1238,6 +1268,7 @@ export function App() {
               </span>
             </div>
           </div>
+          {selectedRoom?.status === 'idle' && <GitBar git={git} />}
 
           {error && <div className="error">{error}</div>}
           {!selectedRoom && <div className="splash"><strong>no room selected</strong><span>create a project from a local repo for a main room, or clone a separate room</span></div>}
@@ -1251,7 +1282,7 @@ export function App() {
           {selectedRoom?.status === 'idle' && (
             <div className="body">
               {tab === 'terminal' && <RoomTerminals room={selectedRoom} onClose={closeTerminal} />}
-              {tab === 'git' && <GitPanel room={selectedRoom} />}
+              {tab === 'git' && <GitPanel room={selectedRoom} git={git} />}
               {tab === 'subagents' && <SubagentsPanel room={selectedRoom} presets={presets} />}
             </div>
           )}
