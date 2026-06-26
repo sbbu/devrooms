@@ -234,6 +234,29 @@ function getTerminalResource(key: string) {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  // Make http(s) URLs clickable. Uses xterm's built-in link provider (no addon) and
+  // opens via window.open → the Electron main's setWindowOpenHandler → shell.openExternal
+  // (i.e. the system browser). Single-line matching, which covers the common case.
+  term.registerLinkProvider({
+    provideLinks(lineNo, callback) {
+      const line = term.buffer.active.getLine(lineNo - 1);
+      if (!line) { callback(undefined); return; }
+      const text = line.translateToString(true);
+      const links: { range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string; activate: () => void }[] = [];
+      const re = /https?:\/\/[^\s"'`<>()[\]{}]+/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text))) {
+        const uri = m[0].replace(/[.,;:!?]+$/, ''); // drop trailing sentence punctuation
+        if (uri.length < 'https://'.length) continue;
+        links.push({
+          range: { start: { x: m.index + 1, y: lineNo }, end: { x: m.index + uri.length, y: lineNo } },
+          text: uri,
+          activate: () => { window.open(uri, '_blank', 'noopener,noreferrer'); },
+        });
+      }
+      callback(links.length ? links : undefined);
+    },
+  });
   const container = document.createElement('div');
   container.className = 'terminal-surface';
   const resource: TerminalResource = { key, container, term, fit, opened: false, hasOutput: false };
