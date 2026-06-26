@@ -20,6 +20,7 @@
     "start": "node dist/server.js",
     "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "smoke": "node scripts/smoke.mjs",
+    "screenshot:readme": "pnpm run build && node scripts/capture-readme-screenshot.mjs",
     "design:review": "bash scripts/claude-design-review.sh",
     "test": "pnpm run check && pnpm run build && pnpm run smoke",
     "lint": "pnpm check",
