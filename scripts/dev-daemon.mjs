@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
-import { killStaleDaemon, killByPort, waitPortFree } from './lib-cleanup.mjs';
+import path from 'node:path';
+import { killStaleDaemon, waitPortFree } from './lib-cleanup.mjs';
+import { superviseReload } from './lib-reload.mjs';
 
 const bin = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const root = process.cwd();
@@ -15,17 +16,25 @@ delete env.DEVROOMS_PROJECT_NAME;
 // Kill any previous daemon for this repo so daemons never pile up. Only the
 // daemon here (not vite) — `pnpm dev` runs vite concurrently as a sibling.
 killStaleDaemon(root, port);
-killByPort(port + 1); // stale pty-host
+// The pty-host (port + 1) is left running so sessions survive restarts; the
+// daemon reuses a healthy one. `pnpm stop` ends it on purpose.
 await waitPortFree(port);
-await waitPortFree(port + 1);
 
-const child = spawn(bin('tsx'), ['watch', 'src/server.ts'], { env, stdio: 'inherit' });
+// Like `tsx watch src/server.ts`, but it will NOT reload while the daemon's source
+// has merge conflict markers — a half-merged server.ts would crash on reload and take
+// the whole app's API down (devrooms watches its own source). The running daemon stays
+// up until the merge is resolved. src/client is excluded; vite owns the UI's HMR.
+const supervisor = superviseReload({
+  cmd: bin('tsx'),
+  args: ['src/server.ts'],
+  cwd: root,
+  env,
+  watchDir: path.join(root, 'src'),
+  excludeDir: path.join(root, 'src', 'client'),
+  label: 'daemon',
+  log: console.error,
+});
 
-const forward = (signal) => {
-  if (!child.killed) child.kill(signal);
-};
-
-process.once('SIGINT', () => forward('SIGINT'));
-process.once('SIGTERM', () => forward('SIGTERM'));
-process.once('SIGHUP', () => forward('SIGHUP'));
-child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+process.once('SIGINT', () => supervisor.stop('SIGINT'));
+process.once('SIGTERM', () => supervisor.stop('SIGTERM'));
+process.once('SIGHUP', () => supervisor.stop('SIGHUP'));

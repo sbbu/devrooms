@@ -122,7 +122,10 @@ run('git', ['config', 'user.email', 'smoke@example.invalid'], src);
 writeFileSync(path.join(src, 'README.md'), 'hello\n');
 run('git', ['add', 'README.md'], src);
 run('git', ['commit', '-m', 'initial sample'], src);
-run('git', ['init', '--bare', remote], root);
+// -b main so the bare remote's HEAD matches the pushed branch (like a real GitHub
+// repo). Without it, HEAD defaults to master while content lives on main, and a
+// no-branch clone lands on an unborn branch.
+run('git', ['init', '--bare', '-b', 'main', remote], root);
 run('git', ['remote', 'add', 'origin', remote], src);
 run('git', ['push', '-u', 'origin', 'main'], src);
 
@@ -132,9 +135,15 @@ let logs = '';
 let server;
 
 function startServer(extraEnv = {}) {
+  // Drop any inherited DEVROOMS_* (project/room identity, bootstrap path): when this
+  // suite runs from inside a devrooms terminal — devrooms dogfoods itself — those
+  // would auto-bootstrap the real repo and break the clean-slate assertions below.
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('DEVROOMS_')));
   const child = spawn('node', ['dist/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot, ...extraEnv },
+    // HOME points at the temp dir so agent-hook installation (which probes
+    // ~/.config/opencode) never touches the real home during tests.
+    env: { ...cleanEnv, HOME: home, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', (chunk) => { logs += chunk.toString(); });

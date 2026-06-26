@@ -401,23 +401,63 @@ function parseStatus(raw: string) {
   const branch = branchLine.replace(/^## /, '');
   const files = lines
     .filter((line) => !line.startsWith('## '))
-    .map((line) => ({
-      index: line.slice(0, 1),
-      workingTree: line.slice(1, 2),
-      path: line.slice(3),
-      raw: line,
-      staged: line.slice(0, 1) !== ' ' && line.slice(0, 1) !== '?',
-      dirty: line.slice(1, 2) !== ' ' || line.startsWith('??'),
-    }));
+    .map((line) => {
+      const x = line.slice(0, 1);
+      const y = line.slice(1, 2);
+      const xy = line.slice(0, 2);
+      return {
+        index: x,
+        workingTree: y,
+        path: line.slice(3),
+        raw: line,
+        staged: x !== ' ' && x !== '?',
+        dirty: y !== ' ' || line.startsWith('??'),
+        // Unmerged paths from a conflicted merge: any U, or both sides added/deleted.
+        // `conflicted` (still has markers) is refined by the status endpoint.
+        unmerged: x === 'U' || y === 'U' || xy === 'AA' || xy === 'DD',
+        conflicted: false,
+      };
+    });
   const ahead = Number(/\bahead (\d+)/.exec(branch)?.[1] ?? 0);
   const behind = Number(/\bbehind (\d+)/.exec(branch)?.[1] ?? 0);
   const hasUpstream = branch.includes('...');
   return { branch, files, raw, dirtyCount: files.length, ahead, behind, hasUpstream };
 }
 
+// Degraded status returned when git itself can't be read — keeps the panel rendering.
+const EMPTY_GIT_STATUS = { branch: '', files: [] as ReturnType<typeof parseStatus>['files'], raw: '', dirtyCount: 0, ahead: 0, behind: 0, hasUpstream: false, unpushedCount: 0, merging: false };
+
+// A file is still in conflict while it carries both the opening and closing merge
+// markers git writes. Requiring both avoids false positives from a lone `=======`.
+async function hasConflictMarkers(absPath: string): Promise<boolean> {
+  try {
+    const text = await fs.readFile(absPath, 'utf8');
+    return /^<{7}[ \t]/m.test(text) && /^>{7}[ \t]/m.test(text);
+  } catch {
+    return false; // gone (e.g. delete/delete) — nothing to resolve in-file
+  }
+}
+
 async function listBranches(room: Room) {
-  const result = await runGit(room, ['branch', '--format=%(refname:short)']);
-  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  // Include remote-tracking branches, not just local ones: a fresh clone has a
+  // single local branch, so without the origin/* refs the branch picker would
+  // only ever offer that one branch. Checking out a bare "main" that exists only
+  // as origin/main makes git auto-create a local tracking branch (DWIM). Use full
+  // refnames (not :short, which collapses refs/remotes/origin/HEAD to "origin").
+  const result = await runGit(room, ['branch', '-a', '--format=%(refname)']);
+  const seen = new Set<string>();
+  const branches: string[] = [];
+  for (const ref of result.stdout.split('\n').map((line) => line.trim()).filter(Boolean)) {
+    if (ref.endsWith('/HEAD')) continue; // skip symbolic refs like origin/HEAD
+    let name: string;
+    if (ref.startsWith('refs/heads/')) name = ref.slice('refs/heads/'.length);
+    else if (ref.startsWith('refs/remotes/origin/')) name = ref.slice('refs/remotes/origin/'.length);
+    else continue; // skip non-origin remotes (checking them out would detach HEAD)
+    if (seen.has(name)) continue; // local branch already covers this name
+    seen.add(name);
+    branches.push(name);
+  }
+  return branches;
 }
 
 async function currentBranch(room: Room) {
@@ -583,7 +623,10 @@ async function createRoom(projectId: string, body: unknown) {
     name,
     path: roomPath,
     kind: 'clone',
-    branch: branch ?? project.defaultBranch,
+    // No explicit branch => clone the repo's default branch (origin/HEAD, i.e.
+    // main/master) rather than whatever branch the project happened to launch on.
+    // The actual branch is recorded after the clone, in materializeRoom.
+    branch,
     status: 'creating',
     createdAt: stamp,
     updatedAt: stamp,
@@ -595,6 +638,42 @@ async function createRoom(projectId: string, body: unknown) {
   return room;
 }
 
+// A clone room is created with `git clone <project.repoUrl> …`. For a folder-picked
+// project repoUrl is a local path, so the clone's origin is the user's own non-bare
+// repo — which refuses `git push` to whatever branch is checked out there. Repoint
+// origin at that local repo's OWN upstream (the real remote) so a clone behaves like a
+// normal clone: push/pull hit a bare remote, divergence flows through pull & merge.
+async function isLocalRepoPath(repoUrl: string): Promise<boolean> {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(repoUrl)) return false; // https:// ssh:// git:// file://
+  if (/^[^/\\]+@[^/\\]+:/.test(repoUrl)) return false;        // scp-like git@host:path
+  try { return (await fs.stat(repoUrl)).isDirectory(); } catch { return false; }
+}
+
+async function remoteUrl(repoPath: string, remote = 'origin'): Promise<string | null> {
+  const result = await run('git', ['remote', 'get-url', remote], repoPath);
+  const url = result.exitCode === 0 ? result.stdout.trim() : '';
+  return url || null;
+}
+
+// A push target is safe unless it's a local NON-bare repo: only those refuse a push to
+// their checked-out branch. Remote URLs and local bare repos accept pushes fine.
+async function isPushableTarget(url: string): Promise<boolean> {
+  if (!(await isLocalRepoPath(url))) return true;
+  const result = await run('git', ['rev-parse', '--is-bare-repository'], url);
+  return result.exitCode === 0 && result.stdout.trim() === 'true';
+}
+
+// Idempotent. No-op once origin is already pushable, or when the local source has no
+// usable upstream of its own (then we keep the local origin as a fallback).
+async function ensureCloneRemote(room: Room): Promise<void> {
+  if (room.kind !== 'clone') return;
+  const origin = await remoteUrl(room.path);
+  if (!origin || (await isPushableTarget(origin))) return;
+  const upstream = await remoteUrl(origin);
+  if (!upstream || upstream === origin || !(await isPushableTarget(upstream))) return;
+  await run('git', ['remote', 'set-url', 'origin', upstream], room.path);
+}
+
 async function materializeRoom(project: Project, room: Room) {
   try {
     await fs.mkdir(path.dirname(room.path), { recursive: true });
@@ -604,6 +683,12 @@ async function materializeRoom(project: Project, room: Room) {
       timeoutMs: 15 * 60_000,
     });
     if (clone.exitCode !== 0) throw new Error(clone.stderr || clone.stdout || 'git clone failed');
+    // Folder-picked projects clone from a local path; point origin at the real remote.
+    await ensureCloneRemote(room).catch((error) => console.error('clone remote repoint failed', error));
+    await run('git', ['fetch', 'origin', '--prune'], room.path).catch(() => { /* offline: keep local refs */ });
+    // Record the branch git actually checked out (the repo default when none was
+    // requested), so the room label and status reflect reality.
+    room.branch = (await currentBranch(room).catch(() => undefined)) || room.branch;
     room.status = 'idle';
     room.updatedAt = now();
   } catch (error) {
@@ -688,7 +773,79 @@ function roomTerminalIds(room: Room) {
 }
 
 async function ensureRoomTerminal(room: Room, terminalId = 'main') {
+  void installAgentStatusHooks(room); // fire-and-forget; never blocks the spawn
   await ptyHostSpawn(roomTerminalKey(room.id, terminalId), { cwd: room.path, env: devroomEnv(room) });
+}
+
+// Explicit per-agent status reporting. Each agent runs a hook on its lifecycle
+// events that emits our private OSC 9279;<state> to the tty, which the pty-host
+// parses into precise thinking / needs-input / done. Best-effort and idempotent;
+// guarded by $DEVROOMS_ROOM_ID so it is a no-op outside devrooms terminals.
+const agentHooksInstalled = new Set<string>();
+let opencodePluginChecked = false;
+
+type ClaudeHookEntry = { matcher?: string; hooks: Array<{ type: string; command: string }> };
+type ClaudeSettings = { hooks?: Record<string, ClaudeHookEntry[]> } & Record<string, unknown>;
+
+function statusHookCommand(state: string) {
+  return `printf '\\033]9279;${state}\\033\\\\' >/dev/tty 2>/dev/null`;
+}
+
+async function installClaudeStatusHooks(room: Room) {
+  const dir = path.join(room.path, '.claude');
+  const file = path.join(dir, 'settings.local.json');
+  let settings: ClaudeSettings = {};
+  try {
+    settings = JSON.parse(await fs.readFile(file, 'utf8')) as ClaudeSettings;
+    if (!settings || typeof settings !== 'object') return; // leave anything unexpected alone
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return; // unreadable/malformed
+  }
+  const hooks = settings.hooks ?? (settings.hooks = {});
+  const events: Array<[string, string]> = [['UserPromptSubmit', 'working'], ['Notification', 'needs-input'], ['Stop', 'done']];
+  let changed = false;
+  for (const [event, state] of events) {
+    const list = hooks[event] ?? (hooks[event] = []);
+    if (JSON.stringify(list).includes('9279')) continue; // ours already present
+    list.push({ matcher: '*', hooks: [{ type: 'command', command: statusHookCommand(state) }] });
+    changed = true;
+  }
+  if (!changed) return;
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(settings, null, 2)}\n`);
+  console.log(`devrooms: installed Claude status hooks -> ${file}`);
+}
+
+async function installOpencodeStatusPlugin() {
+  const configDir = path.join(os.homedir(), '.config', 'opencode');
+  try { await fs.access(configDir); } catch { return; } // not an opencode user — skip
+  const pluginDir = path.join(configDir, 'plugin');
+  const file = path.join(pluginDir, 'devrooms-status.js');
+  try { if ((await fs.readFile(file, 'utf8')).includes('9279')) return; } catch { /* not present yet */ }
+  const content = `// Installed by devrooms — reports agent status to the devrooms sidebar.
+import { writeFileSync } from "node:fs";
+const mark = (s) => { try { if (process.env.DEVROOMS_ROOM_ID) writeFileSync("/dev/tty", "\\u001b]9279;" + s + "\\u001b\\\\"); } catch {} };
+export const DevroomsStatus = async () => ({
+  event: async ({ event }) => {
+    if (event.type === "session.idle") mark("done");
+    else if (event.type === "message.updated") mark("working");
+  },
+});
+`;
+  await fs.mkdir(pluginDir, { recursive: true });
+  await fs.writeFile(file, content);
+  console.log(`devrooms: installed opencode status plugin -> ${file}`);
+}
+
+async function installAgentStatusHooks(room: Room) {
+  if (!agentHooksInstalled.has(room.id)) {
+    agentHooksInstalled.add(room.id);
+    await installClaudeStatusHooks(room).catch((error) => console.log(`devrooms: claude hook install skipped: ${error}`));
+  }
+  if (!opencodePluginChecked) {
+    opencodePluginChecked = true;
+    await installOpencodeStatusPlugin().catch((error) => console.log(`devrooms: opencode plugin install skipped: ${error}`));
+  }
 }
 
 async function killRoomTerminal(roomId: string, terminalId = 'main') {
@@ -878,6 +1035,24 @@ async function ptyHostRunningKeys(): Promise<Set<string>> {
   }
 }
 
+type HostActivity = { status: string; lastOutputMs: number; attentionMs: number; agentState?: string; agentStateMs: number };
+
+async function ptyHostActivity(): Promise<{ now: number; sessions: Record<string, HostActivity> }> {
+  try {
+    const res = await fetch(`${PTY_HOST_URL}/activity`);
+    if (!res.ok) return { now: Date.now(), sessions: {} };
+    return (await res.json()) as { now: number; sessions: Record<string, HostActivity> };
+  } catch {
+    return { now: Date.now(), sessions: {} };
+  }
+}
+
+// Host keys are `room:<roomId>` / `room:<roomId>:<terminalId>` / `proc:<id>`.
+function roomIdFromKey(key: string): string | null {
+  const match = key.match(/^room:([^:]+)(?::.+)?$/);
+  return match ? match[1] : null;
+}
+
 async function ptyHostSpawn(key: string, opts: { kind?: 'process'; command?: string; cwd: string; env: NodeJS.ProcessEnv }) {
   await ensurePtyHost();
   await fetch(`${PTY_HOST_URL}/spawn`, {
@@ -951,6 +1126,31 @@ async function main() {
     res.json({ presets: agentPresets() });
   });
 
+  // Per-room agent activity for the sidebar attention indicator. Aggregates every
+  // terminal in a room: the room is as "busy" as its most-recent output and
+  // surfaces the newest explicit/notification signal across its tiles.
+  app.get('/api/activity', async (_req, res) => {
+    try {
+      const data = await ptyHostActivity();
+      const rooms: Record<string, { lastOutputMs: number; attentionMs: number; agentState?: string; agentStateMs: number }> = {};
+      for (const [key, session] of Object.entries(data.sessions)) {
+        const roomId = roomIdFromKey(key);
+        if (!roomId) continue;
+        const current = rooms[roomId] ?? { lastOutputMs: 0, attentionMs: 0, agentState: undefined, agentStateMs: 0 };
+        current.lastOutputMs = Math.max(current.lastOutputMs, session.lastOutputMs ?? 0);
+        current.attentionMs = Math.max(current.attentionMs, session.attentionMs ?? 0);
+        if ((session.agentStateMs ?? 0) > current.agentStateMs) {
+          current.agentState = session.agentState;
+          current.agentStateMs = session.agentStateMs ?? 0;
+        }
+        rooms[roomId] = current;
+      }
+      res.json({ now: data.now, rooms });
+    } catch (error) {
+      apiError(error, res);
+    }
+  });
+
   app.get('/api/projects', async (_req, res) => {
     const state = await getState();
     res.json({ projects: Object.values(state.projects), rooms: Object.values(state.rooms), processCounts: processCountsByRoom(state) });
@@ -994,13 +1194,32 @@ async function main() {
     try {
       const state = await getState();
       const room = getRoom(state, req.params.roomId);
-      const status = await runGit(room, ['status', '--porcelain=v1', '-b']);
-      const head = await runGit(room, ['rev-parse', '--short', 'HEAD']).catch(() => ({ stdout: '' }));
+      const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path);
+      if (status.exitCode !== 0) {
+        // Git is wedged (not a repo, locked index, half-applied state, …). Degrade
+        // gracefully so the panel keeps rendering and recovery stays reachable —
+        // the poller must never 500 and take the whole git UI down with it.
+        res.json({ status: EMPTY_GIT_STATUS, branches: [], head: '', gitError: (status.stderr || status.stdout || 'git status failed').trim() });
+        return;
+      }
+      const head = await run('git', ['rev-parse', '--short', 'HEAD'], room.path).catch(() => ({ stdout: '' }));
       // Commits on HEAD not reachable from any origin ref = unpushed. Works even
       // when the branch has no tracking upstream (where status's ahead count is 0).
-      const unpushed = await runGit(room, ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin']).catch(() => null);
+      const unpushed = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path).catch(() => ({ stdout: '' }));
       const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
-      res.json({ status: { ...parseStatus(status.stdout), unpushedCount }, branches: await listBranches(room), head: head.stdout.trim() });
+      // A conflicted `pull` leaves MERGE_HEAD behind: the merge is in progress and
+      // must be resolved+committed (or aborted) before push/pull can proceed.
+      const merging = (await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode === 0;
+      const parsed = parseStatus(status.stdout);
+      // Mark a file as still-conflicted only while conflict markers remain in it, so
+      // "commit merge" lights up once the user has resolved them (even before staging).
+      if (merging) {
+        await Promise.all(parsed.files.filter((file) => file.unmerged).map(async (file) => {
+          file.conflicted = await hasConflictMarkers(path.join(room.path, file.path));
+        }));
+      }
+      const branches = await listBranches(room).catch(() => [] as string[]);
+      res.json({ status: { ...parsed, unpushedCount, merging }, branches, head: head.stdout.trim() });
     } catch (error) {
       apiError(error, res);
     }
@@ -1076,6 +1295,9 @@ async function main() {
       const state = await getState();
       const room = getRoom(state, req.params.roomId);
       const op = req.params.op;
+      // Before anything that talks to the remote, make sure a clone room points at the
+      // real upstream rather than the local repo it was cloned from (fixes old rooms too).
+      if (op === 'fetch' || op === 'pull' || op === 'push') await ensureCloneRemote(room);
       let result: RunResult;
       if (op === 'stage') {
         const file = requireString(req.body?.path, 'path');
@@ -1112,12 +1334,47 @@ async function main() {
           await runGit(room, ['add', '--', ...paths]);
         }
         result = await runGit(room, ['commit', '-m', message]);
+      } else if (op === 'discard') {
+        // Throw away uncommitted changes to one path (destructive; client confirms).
+        const file = requireString(req.body?.path, 'path');
+        await assertPathInside(room.path, path.join(room.path, file));
+        const tracked = (await run('git', ['cat-file', '-e', `HEAD:${file}`], room.path)).exitCode === 0;
+        if (tracked) {
+          // Modified/staged/deleted -> restore index + worktree to the committed version.
+          result = await runGit(room, ['checkout', 'HEAD', '--', file]);
+        } else {
+          // New file (staged or untracked) -> unstage if needed, then remove it.
+          await run('git', ['rm', '-f', '--ignore-unmatch', '--', file], room.path);
+          result = await runGit(room, ['clean', '-fd', '--', file]);
+        }
+      } else if (op === 'discard-all') {
+        // Revert all tracked changes and remove every untracked file (destructive).
+        await run('git', ['reset', '--hard', 'HEAD'], room.path); // best-effort: errors only in a commit-less repo
+        result = await runGit(room, ['clean', '-fd']);
+      } else if (op === 'merge-abort') {
+        // Throw away the in-progress merge, returning to the pre-pull state.
+        result = await runGit(room, ['merge', '--abort']);
+      } else if (op === 'merge-continue') {
+        // Conclude a conflicted merge: refuse while any file still has conflict
+        // markers (resolved-but-unstaged is fine), then stage the resolved tracked
+        // files and commit with the prepared merge message.
+        if ((await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode !== 0) throw new HttpError(409, 'no merge in progress');
+        const unmerged = (await run('git', ['diff', '--name-only', '--diff-filter=U'], room.path)).stdout.split('\n').filter(Boolean);
+        const unresolved: string[] = [];
+        for (const file of unmerged) if (await hasConflictMarkers(path.join(room.path, file))) unresolved.push(file);
+        if (unresolved.length) throw new HttpError(409, `unresolved conflict markers in: ${unresolved.join(', ')}`);
+        await runGit(room, ['add', '-u']);
+        result = await runGit(room, ['commit', '--no-edit']);
       } else {
         throw new HttpError(404, `unknown git operation: ${op}`);
       }
       res.json({ ok: true, stdout: result.stdout, stderr: result.stderr });
     } catch (error) {
-      apiError(error, res);
+      // Every op here is a git command; a non-zero exit (conflict, rejected push, dirty
+      // tree, nothing to commit, …) is a user-facing outcome, not a server fault. Report
+      // it as 409 so the client treats it as a handled result and the panel stays alive.
+      if (error instanceof HttpError && error.status === 500) apiError(new HttpError(409, error.message), res);
+      else apiError(error, res);
     }
   });
 

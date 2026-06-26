@@ -8,8 +8,8 @@ import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string; defaultBranch: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[] };
-type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean };
-type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number }; branches: string[]; head: string };
+type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
+type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: string[]; head: string; gitError?: string };
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
@@ -56,6 +56,7 @@ function compactProc(count?: ProcessCount) {
 const STATUS_GLYPH: Record<Room['status'], string> = { idle: '●', creating: '◐', error: '✕' };
 
 function fileGutter(file: GitFile): { ch: string; cls: string } {
+  if (file.conflicted) return { ch: '!', cls: 'conflict' };
   if (file.raw.startsWith('??')) return { ch: '?', cls: 'new' };
   if (file.index.trim() && file.workingTree.trim()) return { ch: '±', cls: 'mixed' };
   if (file.index.trim()) return { ch: 'S', cls: 'staged' };
@@ -372,8 +373,41 @@ function RoomTerminals({ room, onClose }: { room: Room; onClose: (terminalId: st
   );
 }
 
+// Per-room agent state derived from the host's activity stream.
+type RoomActivity = { lastOutputMs: number; attentionMs: number; agentState?: string; agentStateMs: number };
+type RoomState = 'thinking' | 'needs-input' | 'attention' | 'idle';
+const BUSY_MS = 1000;
+const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function deriveRoomState(activity: RoomActivity | undefined, ackMs: number): RoomState {
+  if (!activity) return 'idle';
+  const now = Date.now(); // same machine as the host, so its ms timestamps are comparable
+  // An explicit hook signal wins when it's the last thing that happened.
+  const explicit = activity.agentState && activity.agentStateMs >= activity.lastOutputMs - 150;
+  if (explicit && activity.agentState === 'working') return 'thinking';
+  if (now - activity.lastOutputMs < BUSY_MS) return 'thinking';
+  if (explicit && activity.agentStateMs > ackMs && activity.agentState === 'needs-input') return 'needs-input';
+  if (explicit && activity.agentStateMs > ackMs && activity.agentState === 'done') return 'attention';
+  if (activity.attentionMs > ackMs && activity.attentionMs >= activity.lastOutputMs - 150) return 'attention';
+  return 'idle';
+}
+
+function AgentGlyph({ state }: { state: RoomState }) {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    if (state !== 'thinking') return;
+    const id = window.setInterval(() => setFrame((value) => (value + 1) % SPIN.length), 90);
+    return () => window.clearInterval(id);
+  }, [state]);
+  if (state === 'thinking') return <span className="glyph thinking" title="thinking">{SPIN[frame]}</span>;
+  if (state === 'needs-input') return <span className="glyph needs-input" title="waiting for your input">◆</span>;
+  if (state === 'attention') return <span className="glyph attention" title="finished — your turn">◆</span>;
+  return <span className="glyph idle">●</span>;
+}
+
 function ChangesView({ room, status, branch, onCommitted }: { room: Room; status: GitStatus | null; branch: string; onCommitted: () => Promise<void> | void }) {
   const files = status?.status.files ?? [];
+  const merging = status?.status.merging ?? false;
   const [selected, setSelected] = useState<string | null>(null);
   const [diff, setDiff] = useState<FileDiff | null>(null);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
@@ -438,12 +472,32 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
     finally { setCommitting(false); }
   }
 
+  async function discardFile(path: string) {
+    if (!window.confirm(`Discard changes to ${path}? This can't be undone.`)) return;
+    setError(null);
+    try {
+      await api(`/api/rooms/${room.id}/git/discard`, { method: 'POST', body: JSON.stringify({ path }) });
+      await onCommitted();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
+  async function discardAll() {
+    if (!files.length) return;
+    if (!window.confirm(`Discard all ${files.length} uncommitted change${files.length === 1 ? '' : 's'}? This can't be undone.`)) return;
+    setError(null);
+    try {
+      await api(`/api/rooms/${room.id}/git/discard-all`, { method: 'POST', body: JSON.stringify({}) });
+      await onCommitted();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
   return (
     <div className="changes">
       <div className="chg-left">
         <div className="chg-listhead">
           <input ref={masterRef} type="checkbox" className="ck" checked={allIncluded} onChange={toggleAll} disabled={!files.length} />
           <span>{files.length} changed file{files.length === 1 ? '' : 's'}</span>
+          {files.length > 0 && !merging && <button className="discard-all" title="discard all uncommitted changes" onClick={discardAll}>discard all</button>}
         </div>
         <div className="chg-list">
           {files.length ? files.map((file) => {
@@ -453,18 +507,29 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
                 <input type="checkbox" className="ck" checked={!excluded.has(file.path)} onChange={() => toggle(file.path)} onClick={(event) => event.stopPropagation()} />
                 <span className={`g ${gutter.cls}`}>{gutter.ch}</span>
                 <span className="p">{file.path}</span>
+                {!file.unmerged && <button className="discard-file" title="discard changes" onClick={(event) => { event.stopPropagation(); discardFile(file.path); }}>discard</button>}
               </div>
             );
           }) : <div className="empty clean">no local changes</div>}
         </div>
-        <div className="chg-commitbox">
-          <input value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="summary" />
-          <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="description (optional)" rows={3} />
-          {error && <div className="error inline">{error}</div>}
-          <button className="commit-btn" disabled={committing || !summary.trim() || included.length === 0} onClick={commit}>
-            {committing ? 'committing…' : `commit ${included.length} file${included.length === 1 ? '' : 's'} to ${branch || 'branch'}`}
-          </button>
-        </div>
+        {merging ? (
+          <div className="chg-commitbox merging">
+            <div className="merge-hint">
+              merge in progress. resolve the <span className="g conflict">!</span> files in your editor, then use
+              <strong> commit merge</strong> above. or <strong>abort</strong> to back out.
+            </div>
+            {error && <div className="error inline">{error}</div>}
+          </div>
+        ) : (
+          <div className="chg-commitbox">
+            <input value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="summary" />
+            <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="description (optional)" rows={3} />
+            {error && <div className="error inline">{error}</div>}
+            <button className="commit-btn" disabled={committing || !summary.trim() || included.length === 0} onClick={commit}>
+              {committing ? 'committing…' : `commit ${included.length} file${included.length === 1 ? '' : 's'} to ${branch || 'branch'}`}
+            </button>
+          </div>
+        )}
       </div>
       <div className="diff-pane">
         {selected ? (
@@ -478,7 +543,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
   );
 }
 
-function HistoryView({ room }: { room: Room }) {
+function HistoryView({ room, reloadKey }: { room: Room; reloadKey: number }) {
   const [commits, setCommits] = useState<Commit[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<CommitDetail | null>(null);
@@ -492,7 +557,9 @@ function HistoryView({ room }: { room: Room }) {
       .then((data) => { if (!alive) return; setCommits(data.commits); setSelected((current) => current ?? data.commits[0]?.hash ?? null); })
       .catch((err) => { if (alive) setError(err instanceof Error ? err.message : String(err)); });
     return () => { alive = false; };
-  }, [room.id]);
+    // reloadKey bumps after every git op (push/pull/fetch/checkout) so the
+    // unpushed (↑) markers refresh once a push lands.
+  }, [room.id, reloadKey]);
 
   useEffect(() => {
     if (!selected) { setDetail(null); setFile(null); return; }
@@ -577,12 +644,14 @@ function GitPanel({ room }: { room: Room }) {
   const [note, setNote] = useState('');
   const [newBranch, setNewBranch] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [pushRejected, setPushRejected] = useState(false);
 
   async function refresh() {
     try { setStatus(await api<GitStatus>(`/api/rooms/${room.id}/git/status`)); setError(null); }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   }
-  useEffect(() => { refresh(); }, [room.id]);
+  useEffect(() => { setPushRejected(false); refresh(); }, [room.id]);
   useEffect(() => {
     const onFocus = () => { refresh(); };
     window.addEventListener('focus', onFocus);
@@ -595,9 +664,41 @@ function GitPanel({ room }: { room: Room }) {
     try {
       const result = await api<{ stdout: string; stderr: string }>(`/api/rooms/${room.id}/git/${op}`, { method: 'POST', body: JSON.stringify(body ?? {}) });
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
+      setPushRejected(false);
       await refresh();
+      setReloadKey((value) => value + 1); // re-fetch history so ↑ markers update
       return true;
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); return false; }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Clone room whose origin is a local repo with no real remote: git refuses to push
+      // the branch checked out there. pull & merge can't fix it — say so plainly.
+      if (op === 'push' && /checked out branch|denyCurrentBranch/i.test(message)) {
+        setPushRejected(false);
+        setError(null);
+        setNote('cannot push: that branch is checked out in the repo this room was cloned from. work on a room branch, or give the project a remote.');
+      // Non-fast-forward push: origin moved on. Flip the button to pull & merge
+      // (GitHub Desktop style) — pull merges, then the merge can be pushed.
+      } else if (op === 'push' && /rejected|fetch first|non-fast-forward|failed to push/i.test(message)) {
+        setPushRejected(true);
+        setError(null);
+        setNote('origin has new commits — pull & merge, then push again');
+      } else if (op === 'pull' && /conflict|automatic merge failed|fix conflicts|unmerged/i.test(message)) {
+        // The merge started but hit conflicts. It's not an error to dead-end on:
+        // refresh reveals the merging state, and the UI switches to resolve/commit.
+        setPushRejected(false);
+        setError(null);
+        setNote('merge conflicts — resolve the ! files, then commit the merge');
+        await refresh();
+      } else if (op === 'pull' && /would be overwritten|commit your changes|please commit|stash/i.test(message)) {
+        // Dirty working tree blocks the merge. Point at the natural fix instead of a raw error.
+        setPushRejected(false);
+        setError(null);
+        setNote('you have uncommitted changes — commit them below (or stash) before pull & merge');
+      } else {
+        setError(message);
+      }
+      return false;
+    }
   }
 
   const branch = status?.status.branch.split('...')[0] ?? room.branch ?? '';
@@ -605,29 +706,44 @@ function GitPanel({ room }: { room: Room }) {
   const unpushed = status?.status.unpushedCount ?? 0;
   const behind = status?.status.behind ?? 0;
   const hasUpstream = status?.status.hasUpstream ?? false;
+  const merging = status?.status.merging ?? false;
+  const conflicts = (status?.status.files ?? []).filter((file) => file.conflicted).length;
+  const gitError = status?.gitError;
   // One adaptive sync action, in git terms: pull when behind (incl. diverged),
   // otherwise push when there are unpushed commits, otherwise fetch to check.
-  const syncVerb = behind > 0 ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
+  // A rejected push (origin ahead) forces pull & merge even when our cached
+  // behind-count is stale — we haven't fetched since origin moved on.
+  const mergePull = pushRejected || (behind > 0 && unpushed > 0);
+  const syncVerb = (behind > 0 || pushRejected) ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
   const syncOp = syncVerb;
+  const syncLabel = syncVerb === 'fetch' ? '⟳ fetch' : syncVerb === 'pull' ? (mergePull ? 'pull & merge' : 'pull') : 'push';
   const syncTitle = syncVerb === 'fetch'
     ? 'git fetch --all --prune'
     : syncVerb === 'pull'
-      ? `git pull origin ${branch}`
+      ? (mergePull ? 'origin has new commits — git pull (merge), then push' : `git pull origin ${branch}`)
       : hasUpstream ? `git push origin ${branch}` : `git push -u origin ${branch} (new branch)`;
-  async function doSync() { setSyncing(true); try { await gitOp(syncOp); } finally { setSyncing(false); } }
+  async function doOp(op: string, body?: unknown) { setSyncing(true); try { await gitOp(op, body); } finally { setSyncing(false); } }
 
   return (
     <div className="git">
       <div className="cmdrow">
-        <button className="sync" disabled={syncing} onClick={doSync} title={syncTitle}>
-          <span className="sync-verb">{syncing ? 'syncing…' : syncVerb === 'fetch' ? '⟳ fetch' : syncVerb}</span>
-          {!syncing && (behind > 0 || unpushed > 0) && (
-            <span className="sync-counts">
-              {behind > 0 && <span className="dn">↓{behind}</span>}
-              {unpushed > 0 && <span className="up">↑{unpushed}</span>}
-            </span>
-          )}
-        </button>
+        {merging ? (
+          <span className="mergebar">
+            <span className="merge-state">{conflicts > 0 ? `merging — ${conflicts} conflict${conflicts === 1 ? '' : 's'}` : 'merging — resolved'}</span>
+            <button className="merge-commit" disabled={syncing || conflicts > 0} title="conclude the merge (git commit --no-edit)" onClick={() => doOp('merge-continue')}>commit merge</button>
+            <button className="merge-abort" disabled={syncing} title="discard the merge (git merge --abort)" onClick={() => doOp('merge-abort')}>abort</button>
+          </span>
+        ) : (
+          <button className="sync" disabled={syncing} onClick={() => doOp(syncOp)} title={syncTitle}>
+            <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
+            {!syncing && (behind > 0 || unpushed > 0) && (
+              <span className="sync-counts">
+                {behind > 0 && <span className="dn">↓{behind}</span>}
+                {unpushed > 0 && <span className="up">↑{unpushed}</span>}
+              </span>
+            )}
+          </button>
+        )}
         <span className="branch-sel">
           <span className="lbl">branch</span>
           <select value={branch} onChange={(event) => { if (event.target.value && event.target.value !== branch) gitOp('checkout', { branch: event.target.value }); }}>
@@ -642,9 +758,10 @@ function GitPanel({ room }: { room: Room }) {
         <button className={view === 'history' ? 'gt active' : 'gt'} onClick={() => setView('history')}>history</button>
       </div>
       {error && <div className="error">{error}</div>}
+      {gitError && <div className="error">git unavailable: {gitError}</div>}
       {view === 'changes'
         ? <ChangesView room={room} status={status} branch={branch} onCommitted={refresh} />
-        : <HistoryView room={room} />}
+        : <HistoryView room={room} reloadKey={reloadKey} />}
       {note && <div className="gitnote" onClick={() => setNote('')}>{note}</div>}
     </div>
   );
@@ -723,6 +840,9 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [, setThemeTick] = useState(0);
+  const [activity, setActivity] = useState<Record<string, RoomActivity>>({});
+  // When a room was last "seen" — attention older than this is acknowledged.
+  const ackRef = useRef<Record<string, number>>({});
 
   // Re-render (status bar theme readout) whenever a theme is committed or the
   // system light/dark setting flips while on "system".
@@ -766,6 +886,25 @@ export function App() {
     const timer = setInterval(() => refresh().catch(() => undefined), 5000);
     return () => clearInterval(timer);
   }, [selectedProjectId, selectedRoomId]);
+
+  // Poll per-room agent activity for the sidebar attention indicator, and keep the
+  // focused room acknowledged so it never flags attention while you're watching it.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const data = await api<{ now: number; rooms: Record<string, RoomActivity> }>('/api/activity');
+        if (!alive) return;
+        if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now();
+        setActivity(data.rooms);
+      } catch { /* host may be momentarily unreachable */ }
+    };
+    poll();
+    const timer = setInterval(poll, 1200);
+    return () => { alive = false; clearInterval(timer); };
+  }, [selectedRoomId]);
+
+  useEffect(() => { if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now(); }, [selectedRoomId]);
 
   async function refreshRoomProcesses(roomId: string) {
     const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
@@ -906,7 +1045,9 @@ export function App() {
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
                           <span className="conn">{last ? '└' : '├'}</span>
-                          <span className={`glyph ${room.status}`}>{STATUS_GLYPH[room.status]}</span>
+                          {room.status === 'idle'
+                            ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
+                            : <span className={`glyph ${room.status}`}>{STATUS_GLYPH[room.status]}</span>}
                           <span className="rname">{room.name}</span>
                           <span className="kind">{room.kind === 'main' ? 'main' : 'clone'}</span>
                           {procLabel && <span className="count2">{procLabel}</span>}
