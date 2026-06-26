@@ -249,8 +249,13 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .chg-file { align-items: center; cursor: pointer; display: flex; gap: 9px; overflow: hidden; padding: 3px 12px; white-space: nowrap; }
 .chg-file:hover { background: var(--surface); }
 .chg-file.sel { background: var(--surface); box-shadow: inset 2px 0 0 var(--cyan); }
-.chg-file .p { color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
+.chg-file .p { color: var(--fg); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chg-file.sel .p { color: var(--cyan); }
+.chg-listhead .discard-all { background: none; border: none; color: var(--dim); cursor: pointer; font: inherit; margin-left: auto; }
+.chg-listhead .discard-all:hover { color: var(--red); }
+.discard-file { background: none; border: none; color: var(--faint); cursor: pointer; flex: none; font: inherit; opacity: 0; }
+.chg-file:hover .discard-file, .chg-file.sel .discard-file { opacity: 1; }
+.discard-file:hover { color: var(--red); }
 
 .g { flex: none; text-align: center; width: 1ch; }
 .g.new, .g.staged { color: var(--green); }

@@ -468,12 +468,32 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
     finally { setCommitting(false); }
   }
 
+  async function discardFile(path: string) {
+    if (!window.confirm(`Discard changes to ${path}? This can't be undone.`)) return;
+    setError(null);
+    try {
+      await api(`/api/rooms/${room.id}/git/discard`, { method: 'POST', body: JSON.stringify({ path }) });
+      await onCommitted();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
+  async function discardAll() {
+    if (!files.length) return;
+    if (!window.confirm(`Discard all ${files.length} uncommitted change${files.length === 1 ? '' : 's'}? This can't be undone.`)) return;
+    setError(null);
+    try {
+      await api(`/api/rooms/${room.id}/git/discard-all`, { method: 'POST', body: JSON.stringify({}) });
+      await onCommitted();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
   return (
     <div className="changes">
       <div className="chg-left">
         <div className="chg-listhead">
           <input ref={masterRef} type="checkbox" className="ck" checked={allIncluded} onChange={toggleAll} disabled={!files.length} />
           <span>{files.length} changed file{files.length === 1 ? '' : 's'}</span>
+          {files.length > 0 && <button className="discard-all" title="discard all uncommitted changes" onClick={discardAll}>discard all</button>}
         </div>
         <div className="chg-list">
           {files.length ? files.map((file) => {
@@ -483,6 +503,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
                 <input type="checkbox" className="ck" checked={!excluded.has(file.path)} onChange={() => toggle(file.path)} onClick={(event) => event.stopPropagation()} />
                 <span className={`g ${gutter.cls}`}>{gutter.ch}</span>
                 <span className="p">{file.path}</span>
+                <button className="discard-file" title="discard changes" onClick={(event) => { event.stopPropagation(); discardFile(file.path); }}>discard</button>
               </div>
             );
           }) : <div className="empty clean">no local changes</div>}
@@ -508,7 +529,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
   );
 }
 
-function HistoryView({ room }: { room: Room }) {
+function HistoryView({ room, reloadKey }: { room: Room; reloadKey: number }) {
   const [commits, setCommits] = useState<Commit[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<CommitDetail | null>(null);
@@ -522,7 +543,9 @@ function HistoryView({ room }: { room: Room }) {
       .then((data) => { if (!alive) return; setCommits(data.commits); setSelected((current) => current ?? data.commits[0]?.hash ?? null); })
       .catch((err) => { if (alive) setError(err instanceof Error ? err.message : String(err)); });
     return () => { alive = false; };
-  }, [room.id]);
+    // reloadKey bumps after every git op (push/pull/fetch/checkout) so the
+    // unpushed (↑) markers refresh once a push lands.
+  }, [room.id, reloadKey]);
 
   useEffect(() => {
     if (!selected) { setDetail(null); setFile(null); return; }
@@ -607,12 +630,14 @@ function GitPanel({ room }: { room: Room }) {
   const [note, setNote] = useState('');
   const [newBranch, setNewBranch] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [pushRejected, setPushRejected] = useState(false);
 
   async function refresh() {
     try { setStatus(await api<GitStatus>(`/api/rooms/${room.id}/git/status`)); setError(null); }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
   }
-  useEffect(() => { refresh(); }, [room.id]);
+  useEffect(() => { setPushRejected(false); refresh(); }, [room.id]);
   useEffect(() => {
     const onFocus = () => { refresh(); };
     window.addEventListener('focus', onFocus);
@@ -625,9 +650,23 @@ function GitPanel({ room }: { room: Room }) {
     try {
       const result = await api<{ stdout: string; stderr: string }>(`/api/rooms/${room.id}/git/${op}`, { method: 'POST', body: JSON.stringify(body ?? {}) });
       setNote([result.stdout, result.stderr].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200) || `${op} ok`);
+      setPushRejected(false);
       await refresh();
+      setReloadKey((value) => value + 1); // re-fetch history so ↑ markers update
       return true;
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); return false; }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Non-fast-forward push: origin moved on. Flip the button to pull & merge
+      // (GitHub Desktop style) — pull merges, then the merge can be pushed.
+      if (op === 'push' && /rejected|fetch first|non-fast-forward|failed to push/i.test(message)) {
+        setPushRejected(true);
+        setError(null);
+        setNote('origin has new commits — pull & merge, then push again');
+      } else {
+        setError(message);
+      }
+      return false;
+    }
   }
 
   const branch = status?.status.branch.split('...')[0] ?? room.branch ?? '';
@@ -637,12 +676,16 @@ function GitPanel({ room }: { room: Room }) {
   const hasUpstream = status?.status.hasUpstream ?? false;
   // One adaptive sync action, in git terms: pull when behind (incl. diverged),
   // otherwise push when there are unpushed commits, otherwise fetch to check.
-  const syncVerb = behind > 0 ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
+  // A rejected push (origin ahead) forces pull & merge even when our cached
+  // behind-count is stale — we haven't fetched since origin moved on.
+  const mergePull = pushRejected || (behind > 0 && unpushed > 0);
+  const syncVerb = (behind > 0 || pushRejected) ? 'pull' : unpushed > 0 ? 'push' : 'fetch';
   const syncOp = syncVerb;
+  const syncLabel = syncVerb === 'fetch' ? '⟳ fetch' : syncVerb === 'pull' ? (mergePull ? 'pull & merge' : 'pull') : 'push';
   const syncTitle = syncVerb === 'fetch'
     ? 'git fetch --all --prune'
     : syncVerb === 'pull'
-      ? `git pull origin ${branch}`
+      ? (mergePull ? 'origin has new commits — git pull (merge), then push' : `git pull origin ${branch}`)
       : hasUpstream ? `git push origin ${branch}` : `git push -u origin ${branch} (new branch)`;
   async function doSync() { setSyncing(true); try { await gitOp(syncOp); } finally { setSyncing(false); } }
 
@@ -650,7 +693,7 @@ function GitPanel({ room }: { room: Room }) {
     <div className="git">
       <div className="cmdrow">
         <button className="sync" disabled={syncing} onClick={doSync} title={syncTitle}>
-          <span className="sync-verb">{syncing ? 'syncing…' : syncVerb === 'fetch' ? '⟳ fetch' : syncVerb}</span>
+          <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
           {!syncing && (behind > 0 || unpushed > 0) && (
             <span className="sync-counts">
               {behind > 0 && <span className="dn">↓{behind}</span>}
@@ -674,7 +717,7 @@ function GitPanel({ room }: { room: Room }) {
       {error && <div className="error">{error}</div>}
       {view === 'changes'
         ? <ChangesView room={room} status={status} branch={branch} onCommitted={refresh} />
-        : <HistoryView room={room} />}
+        : <HistoryView room={room} reloadKey={reloadKey} />}
       {note && <div className="gitnote" onClick={() => setNote('')}>{note}</div>}
     </div>
   );
