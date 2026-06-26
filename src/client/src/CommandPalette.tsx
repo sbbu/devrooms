@@ -22,6 +22,7 @@ export type Command = {
   title: string;
   hint?: string;
   keywords?: string;
+  shortcut?: string;     // display-only key hint, e.g. "⌘1" / "Ctrl+R"
   // Selecting a command either runs it immediately or, when it declares a
   // `prompt`, opens an inline field form in the palette and runs perform() with
   // the collected values on submit.
@@ -36,6 +37,7 @@ type Row = {
   title: string;
   hint?: string;
   tag?: string;          // right-aligned label, e.g. "dark" / "light"
+  keys?: string;         // right-aligned key hint, e.g. "⌘1"
   swatches?: string[];   // little color chips for theme rows
   checked?: boolean;     // current-selection dot
   search: string;        // text matched against the query
@@ -133,7 +135,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
     { key: '_theme', title: 'theme', hint: 'change the color theme', search: 'theme color colors palette appearance', run: enterTheme },
     { key: '_appearance', title: 'appearance', hint: `system · light · dark — now ${resolveMode()}`, search: 'appearance light dark mode system', run: enterAppearance },
     ...commands.map((cmd) => ({
-      key: cmd.id, title: cmd.title, hint: cmd.hint,
+      key: cmd.id, title: cmd.title, hint: cmd.hint, keys: cmd.shortcut,
       search: `${cmd.title} ${cmd.keywords ?? ''}`,
       run: () => { if (cmd.prompt) enterPrompt(cmd); else { cmd.perform(); onClose(); } },
     })),
@@ -288,6 +290,7 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
                 {row.hint && <span className="cmd-hint">{row.hint}</span>}
               </span>
               {row.tag && <span className="cmd-tag">{row.tag}</span>}
+              {row.keys && <span className="cmd-keys">{row.keys}</span>}
               {row.checked && <span className="cmd-check">●</span>}
             </div>
           )) : <div className="cmd-empty">no matches</div>}

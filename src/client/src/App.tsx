@@ -6,6 +6,13 @@ import './styles.css';
 import { CommandPalette, score, type Command } from './CommandPalette';
 import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
 
+// Keyboard-shortcut modifier for hints + handlers: ⌘ on macOS (never reaches the
+// PTY, so shortcuts fire even with the terminal focused), Ctrl elsewhere.
+const IS_MAC = /mac|darwin/i.test(window.devrooms?.platform ?? navigator.platform ?? '');
+const MOD_KEY = IS_MAC ? '⌘' : 'Ctrl+';
+const MOD_SHIFT = IS_MAC ? '⌘⇧' : 'Ctrl+Shift+';
+const MOD_DEL = IS_MAC ? '⌘⌫' : 'Ctrl+⌫';
+
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[]; label?: string };
 type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
@@ -873,6 +880,12 @@ function BranchMenu({ open, onClose, current, branches, canMerge, onCheckout, on
 function GitBar({ git }: { git: GitRoom }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { branch, otherBranches, merging, conflicts, syncing, syncOp, syncLabel, syncTitle, behind, unpushed, doOp, gitOp } = git;
+  // The global ⌘⇧B shortcut and the "git: branch…" palette command open this menu.
+  useEffect(() => {
+    const open = () => setMenuOpen(true);
+    window.addEventListener('devrooms:branch-menu', open);
+    return () => window.removeEventListener('devrooms:branch-menu', open);
+  }, []);
   return (
     <span className="headgit">
       {merging ? (
@@ -882,7 +895,7 @@ function GitBar({ git }: { git: GitRoom }) {
           <button className="merge-abort" disabled={syncing} title="discard the merge (git merge --abort)" onClick={() => doOp('merge-abort')}>abort</button>
         </span>
       ) : (
-        <button className="sync" disabled={syncing} onClick={() => doOp(syncOp)} title={syncTitle}>
+        <button className="sync" disabled={syncing} onClick={() => doOp(syncOp)} title={`${syncTitle}  (${MOD_KEY}S)`}>
           <span className="sync-verb">{syncing ? 'syncing…' : syncLabel}</span>
           {!syncing && (behind > 0 || unpushed > 0) && (
             <span className="sync-counts">
@@ -890,10 +903,12 @@ function GitBar({ git }: { git: GitRoom }) {
               {unpushed > 0 && <span className="up">↑{unpushed}</span>}
             </span>
           )}
+          {!syncing && <span className="kbd-hint">{MOD_KEY}S</span>}
         </button>
       )}
-      <button className="branch-btn" disabled={syncing} onClick={() => setMenuOpen(true)} title="switch / merge / create branch">
+      <button className="branch-btn" disabled={syncing} onClick={() => setMenuOpen(true)} title={`switch / merge / create branch  (${MOD_SHIFT}B)`}>
         <span className="branch-cur">{branch || 'branch'}</span><span className="branch-caret">▾</span>
+        <span className="kbd-hint">{MOD_SHIFT}B</span>
       </button>
       <BranchMenu
         open={menuOpen}
@@ -1077,7 +1092,8 @@ export function App() {
     try { localStorage.setItem('devrooms.rail', 'full'); } catch { /* storage may be unavailable */ }
     setRailPref('full');
   }
-  const shortcutHint = /mac|darwin/i.test(window.devrooms?.platform ?? navigator.platform ?? '') ? '⌘b' : 'ctrl+b';
+  const isMac = IS_MAC, MOD = MOD_KEY, MODSHIFT = MOD_SHIFT, KDEL = MOD_DEL;
+  const shortcutHint = `${MOD}B`;
 
   async function refresh() {
     const [projectData, presetData, metaData] = await Promise.all([
@@ -1100,20 +1116,16 @@ export function App() {
     return () => mq.removeEventListener('change', onChange);
   }, []);
 
-  // Cmd/Ctrl+B toggles the rail, but never while typing in a field or the terminal
-  // (xterm focuses a TEXTAREA, so Ctrl+B still reaches tmux unharmed).
+  // All app keyboard shortcuts run through one capture-phase listener (mounted once)
+  // that delegates to a ref reassigned each render, so it always sees current state
+  // without re-subscribing. The handler body is assigned below, after the actions it
+  // calls are defined. See shortcutRef.current = … near the command list.
+  const shortcutRef = useRef<(event: KeyboardEvent) => void>(() => {});
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'b') return;
-      const target = event.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
-      event.preventDefault();
-      toggleRail();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [toggleRail]);
+    const onKey = (event: KeyboardEvent) => shortcutRef.current(event);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => refresh().catch(() => undefined), 5000);
@@ -1239,14 +1251,14 @@ export function App() {
   // App actions surfaced in the command palette (Theme + Appearance are added by
   // the palette itself). Rebuilt each render so the closures see current state.
   const commands: Command[] = [
-    { id: 'go-terminal', title: 'go to terminal', hint: 'show the terminal tab', keywords: 'terminal shell view', perform: () => setTab('terminal') },
-    { id: 'go-git', title: 'go to git', hint: 'show the git tab', keywords: 'git diff changes commit', perform: () => setTab('git') },
-    { id: 'go-subagents', title: 'go to subagents', hint: 'show the subagents tab', keywords: 'agents processes hermes claude codex', perform: () => setTab('subagents') },
+    { id: 'go-terminal', title: 'go to terminal', hint: 'show the terminal tab', keywords: 'terminal shell view', shortcut: `${MOD}1`, perform: () => setTab('terminal') },
+    { id: 'go-git', title: 'go to git', hint: 'show the git tab', keywords: 'git diff changes commit', shortcut: `${MOD}2`, perform: () => setTab('git') },
+    { id: 'go-subagents', title: 'go to subagents', hint: 'show the subagents tab', keywords: 'agents processes hermes claude codex', shortcut: `${MOD}3`, perform: () => setTab('subagents') },
     { id: 'refresh', title: 'refresh', hint: 'reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
     {
       id: 'new-room', title: 'clone room…',
       hint: selectedProject ? `clone a room into ${selectedProject.name}` : 'clone a room into this project',
-      keywords: 'clone create new room',
+      keywords: 'clone create new room', shortcut: `${MOD}N`,
       prompt: {
         title: 'clone room', submitLabel: 'clone room',
         fields: [
@@ -1256,14 +1268,44 @@ export function App() {
       },
       perform: (values) => { void createRoom(values?.name ?? '', values?.branch ?? ''); },
     },
-    { id: 'new-project', title: 'new project…', hint: 'pick a local repo folder', keywords: 'folder repo open add', perform: () => { void pickProjectFolder(); } },
+    { id: 'new-project', title: 'new project…', hint: 'pick a local repo folder', keywords: 'folder repo open add', shortcut: `${MODSHIFT}N`, perform: () => { void pickProjectFolder(); } },
+    { id: 'toggle-sidebar', title: 'toggle sidebar', hint: 'show / hide the rooms rail', keywords: 'sidebar rail collapse expand', shortcut: `${MOD}B`, perform: () => toggleRail() },
   ];
   if (selectedRoom?.status === 'idle' && terminalCount < 6) {
-    commands.splice(1, 0, { id: 'new-terminal', title: 'new terminal', hint: 'add a tiled terminal to this room', keywords: 'split pane add tiled', perform: () => { void addTerminal(); } });
+    commands.splice(1, 0, { id: 'new-terminal', title: 'new terminal', hint: 'add a tiled terminal to this room', keywords: 'split pane add tiled', shortcut: `${MOD}T`, perform: () => { void addTerminal(); } });
+  }
+  if (selectedRoom?.status === 'idle') {
+    commands.push({ id: 'git-sync', title: 'git: sync', hint: 'fetch / pull / push (whatever this room needs)', keywords: 'fetch pull push sync git', shortcut: `${MOD}S`, perform: () => { void git.doOp(git.syncOp); } });
+    commands.push({ id: 'git-branch', title: 'git: branch…', hint: 'switch, merge, or create a branch', keywords: 'branch switch checkout merge create', shortcut: `${MODSHIFT}B`, perform: () => window.dispatchEvent(new Event('devrooms:branch-menu')) });
   }
   if (selectedRoom) {
-    commands.push({ id: 'delete-room', title: 'delete current room', hint: selectedRoom.name, keywords: 'remove destroy', perform: () => { void deleteSelectedRoom(); } });
+    commands.push({ id: 'delete-room', title: 'delete current room', hint: selectedRoom.name, keywords: 'remove destroy', shortcut: KDEL, perform: () => { void deleteSelectedRoom(); } });
   }
+
+  // Assign the global shortcut handler (mounted once above). ⌘ on macOS works even
+  // with the terminal focused; Ctrl on win/linux is left alone inside text fields so
+  // it still reaches the terminal. The palette / branch menu own the keyboard when open.
+  // Note: ⌘R is deliberately NOT bound — Electron's default menu owns it (window reload).
+  shortcutRef.current = (event) => {
+    const mod = isMac ? event.metaKey : event.ctrlKey;
+    if (!mod || event.altKey) return;
+    if (document.querySelector('.cmd-overlay')) return;
+    const target = event.target as HTMLElement | null;
+    const inText = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || !!target.isContentEditable);
+    if (!isMac && inText) return;
+    const shift = event.shiftKey;
+    const hit = (fn: () => void) => { event.preventDefault(); event.stopPropagation(); fn(); };
+    switch (event.code) {
+      case 'Digit1': return hit(() => setTab('terminal'));
+      case 'Digit2': return hit(() => setTab('git'));
+      case 'Digit3': return hit(() => setTab('subagents'));
+      case 'KeyB': return hit(() => { if (shift) window.dispatchEvent(new Event('devrooms:branch-menu')); else toggleRail(); });
+      case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { if (miniRail && !forcedMini) expandRail(); setShowNewRoom(true); } });
+      case 'KeyT': if (!shift && selectedRoom?.status === 'idle' && terminalCount < 6) return hit(() => { setTab('terminal'); void addTerminal(); }); return;
+      case 'KeyS': if (!shift && selectedRoom?.status === 'idle' && !git.merging) return hit(() => { void git.doOp(git.syncOp); }); return;
+    }
+    if ((event.key === 'Backspace' || event.key === 'Delete') && !shift && !inText && selectedRoom) hit(() => { void deleteSelectedRoom(); });
+  };
 
   const activeTheme = resolveTheme(getConfig());
 
@@ -1356,8 +1398,8 @@ export function App() {
           ) : <div className="empty">no projects yet — hit + project</div>}
 
           <div className="addbar">
-            <button title="new room" onClick={() => { if (miniRail) { if (!forcedMini) expandRail(); setShowNewRoom(true); } else { setShowNewRoom((value) => !value); } }}>+ room</button>
-            <button title="add project from folder" disabled={busy} onClick={pickProjectFolder}>+ project</button>
+            <button title={`new room (${MOD_KEY}N)`} onClick={() => { if (miniRail) { if (!forcedMini) expandRail(); setShowNewRoom(true); } else { setShowNewRoom((value) => !value); } }}>+ room<span className="kbd-hint">{MOD_KEY}N</span></button>
+            <button title={`add project from folder (${MOD_SHIFT}N)`} disabled={busy} onClick={pickProjectFolder}>+ project<span className="kbd-hint">{MOD_SHIFT}N</span></button>
           </div>
           {showNewRoom && (
             <div className="addform">
@@ -1376,17 +1418,17 @@ export function App() {
               <span className="rpath">{selectedRoom ? shortPath(selectedRoom.path) : 'create a project or clone a room to begin'}</span>
             </div>
             <div className="tabs">
-              <button className={tab === 'terminal' ? 'tab active' : 'tab'} onClick={() => setTab('terminal')}>terminal</button>
-              <button className={tab === 'git' ? 'tab active' : 'tab'} onClick={() => setTab('git')}>git</button>
-              <button className={tab === 'subagents' ? 'tab active' : 'tab'} onClick={() => setTab('subagents')}>subagents</button>
+              <button className={tab === 'terminal' ? 'tab active' : 'tab'} onClick={() => setTab('terminal')} title={`terminal (${MOD_KEY}1)`}>terminal<span className="kbd-hint">{MOD_KEY}1</span></button>
+              <button className={tab === 'git' ? 'tab active' : 'tab'} onClick={() => setTab('git')} title={`git (${MOD_KEY}2)`}>git<span className="kbd-hint">{MOD_KEY}2</span></button>
+              <button className={tab === 'subagents' ? 'tab active' : 'tab'} onClick={() => setTab('subagents')} title={`subagents (${MOD_KEY}3)`}>subagents<span className="kbd-hint">{MOD_KEY}3</span></button>
               {selectedRoom?.status === 'idle' && <GitBar git={git} />}
               <span className="spacer" />
               <span className="tab-actions">
                 {tab === 'terminal' && selectedRoom?.status === 'idle' && (
-                  <button onClick={addTerminal} disabled={busy || terminalCount >= 6} title="add a tiled terminal">+ term</button>
+                  <button onClick={addTerminal} disabled={busy || terminalCount >= 6} title={`add a tiled terminal (${MOD_KEY}T)`}>+ term<span className="kbd-hint">{MOD_KEY}T</span></button>
                 )}
-                <button onClick={() => refresh()}>refresh</button>
-                {selectedRoom && <button className="danger" onClick={deleteSelectedRoom}>delete</button>}
+                <button onClick={() => refresh()} title="reload projects and rooms">refresh</button>
+                {selectedRoom && <button className="danger" onClick={deleteSelectedRoom} title={`delete this room (${MOD_DEL})`}>delete<span className="kbd-hint">{MOD_DEL}</span></button>}
               </span>
             </div>
           </div>

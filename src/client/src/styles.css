@@ -227,7 +227,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 /* collapsed state: drop labels, center the glyphs, surface the monogram */
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .rhandle, .kind, .count2, .gitstate, .pname) { display: none; }
+.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) :is(.conn, .rname, .rhandle, .kind, .count2, .gitstate, .pname, .kbd-hint) { display: none; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .mark { display: inline; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .node { gap: 4px; justify-content: center; padding: 4px 0; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .project-node { border-top: 1px solid var(--hairline); } /* restores the grouping the ├/└ gave */
@@ -274,6 +274,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .tabs .spacer { flex: 1; }
 .tab-actions { display: flex; gap: 16px; }
 .tab-actions .danger:hover { color: var(--red); }
+
+/* keyboard-shortcut hint shown next to a label/button (muted, unobtrusive) */
+.kbd-hint { color: var(--faint); font-size: 10px; letter-spacing: 0.02em; margin-left: 6px; }
+.tab.active .kbd-hint { color: var(--base); opacity: 0.6; }
 
 .body { display: flex; flex: 1; min-height: 0; min-width: 0; }
 
@@ -547,6 +551,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .cmd-row.sel .cmd-title { color: var(--cyan); }
 .cmd-hint { color: var(--dim); flex: 1; font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmd-tag { color: var(--dim); flex: none; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.cmd-keys { color: var(--faint); flex: none; font-size: 11px; }
+.cmd-row.sel .cmd-keys { color: var(--dim); }
 .cmd-check { color: var(--cyan); flex: none; font-size: 9px; }
 .cmd-swatches { border: 1px solid var(--hairline); display: inline-flex; flex: none; }
 .cmd-swatch { height: 16px; width: 10px; }
