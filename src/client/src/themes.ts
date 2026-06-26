@@ -143,7 +143,7 @@ export function getActiveTheme(): ResolvedTheme {
 }
 
 // ── applying to the DOM + terminals ─────────────────────────────────────────
-type TerminalLike = { term: { options: { theme?: ITheme } } };
+type TerminalLike = { term: { options: { theme?: ITheme }; rows: number; refresh(start: number, end: number): void; clearTextureAtlas?(): void } };
 
 function paint(theme: ResolvedTheme) {
   active = theme;
@@ -163,8 +163,19 @@ function paint(theme: ResolvedTheme) {
   root.setProperty('--selection', theme.terminal.selectionBackground);
   root.colorScheme = theme.mode;
   for (const resource of window.__DEVROOMS_TERMINALS__?.values() ?? []) {
-    (resource as TerminalLike).term.options.theme = theme.terminal;
+    const term = (resource as TerminalLike).term;
+    term.options.theme = theme.terminal;
+    // Swapping the theme remaps palette-indexed cells, but the renderer can keep
+    // stale glyphs cached in its texture atlas — drop it and repaint every visible
+    // row so no cells straggle on the old colors. (Absolute-RGB/truecolor cells a
+    // running TUI drew can't remap; those correct when the TUI itself redraws.)
+    term.clearTextureAtlas?.();
+    term.refresh(0, Math.max(0, term.rows - 1));
   }
+  // Keep the native (frameless) window background in step with the theme so the
+  // window's corners and resize gutter don't stay dark under a light theme. The
+  // bridge is Electron-only; in the browser this is a no-op.
+  window.devrooms?.setBackgroundColor?.(ui.base);
 }
 
 function persist() {

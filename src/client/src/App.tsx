@@ -160,7 +160,7 @@ declare global {
   interface Window {
     __DEVROOMS_TERMINALS__?: Map<string, TerminalResource>;
     __DEVROOMS_TERMINAL_UNLOAD_BOUND__?: boolean;
-    devrooms?: { platform: string; windowControl: (action: 'minimize' | 'close' | 'fullscreen') => void; pickDirectory: () => Promise<string | null> };
+    devrooms?: { platform: string; windowControl: (action: 'minimize' | 'close' | 'fullscreen') => void; pickDirectory: () => Promise<string | null>; setBackgroundColor: (color: string) => void };
   }
 }
 
