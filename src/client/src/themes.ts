@@ -143,7 +143,10 @@ export function getActiveTheme(): ResolvedTheme {
 }
 
 // ── applying to the DOM + terminals ─────────────────────────────────────────
-type TerminalLike = { term: { options: { theme?: ITheme }; rows: number; refresh(start: number, end: number): void; clearTextureAtlas?(): void } };
+type TerminalLike = {
+  term: { options: { theme?: ITheme }; rows: number; refresh(start: number, end: number): void; clearTextureAtlas?(): void };
+  notifyColorScheme?: (mode: Mode) => void;
+};
 
 function paint(theme: ResolvedTheme) {
   active = theme;
@@ -163,7 +166,8 @@ function paint(theme: ResolvedTheme) {
   root.setProperty('--selection', theme.terminal.selectionBackground);
   root.colorScheme = theme.mode;
   for (const resource of window.__DEVROOMS_TERMINALS__?.values() ?? []) {
-    const term = (resource as TerminalLike).term;
+    const like = resource as TerminalLike;
+    const term = like.term;
     term.options.theme = theme.terminal;
     // Swapping the theme remaps palette-indexed cells, but the renderer can keep
     // stale glyphs cached in its texture atlas — drop it and repaint every visible
@@ -171,6 +175,10 @@ function paint(theme: ResolvedTheme) {
     // running TUI drew can't remap; those correct when the TUI itself redraws.)
     term.clearTextureAtlas?.();
     term.refresh(0, Math.max(0, term.rows - 1));
+    // Nudge truecolor TUIs that opted into DEC 2031 (e.g. opencode's "system" theme)
+    // to re-detect light/dark and redraw — the only way they follow a theme change,
+    // since the palette remap above can't touch their absolute-RGB cells.
+    like.notifyColorScheme?.(theme.mode);
   }
   // Keep the native (frameless) window background in step with the theme so the
   // window's corners and resize gutter don't stay dark under a light theme. The

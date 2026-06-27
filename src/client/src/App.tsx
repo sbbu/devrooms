@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { CommandPalette, score, type Command } from './CommandPalette';
-import { getActiveTheme, getConfig, resolveTheme, subscribe } from './themes';
+import { getActiveTheme, getConfig, resolveTheme, subscribe, type Mode } from './themes';
 import hljs from 'highlight.js/lib/common';
 
 // Keyboard-shortcut modifier for hints + handlers: ⌘ on macOS (never reaches the
@@ -221,6 +221,9 @@ type TerminalResource = {
   input?: { dispose(): void };
   reconnectTimer?: number;
   retries?: number;
+  wants2031?: boolean;                       // app opted into DEC 2031 color-scheme notifications
+  lastSchemeSent?: Mode;                      // dedup: only notify when light/dark actually flips
+  notifyColorScheme?: (mode: Mode) => void;  // push a CSI ? 997 ; Ps n notification (themes.ts calls this)
 };
 
 declare global {
@@ -340,6 +343,38 @@ function getTerminalResource(key: string) {
     }
     return true;
   });
+  // DEC private mode 2031 — color-scheme-change notifications. Adaptive TUIs (e.g.
+  // opencode's "system" theme) enable 2031 and then rely on the *terminal* to tell
+  // them when light/dark flips; on that signal they re-query OSC 10/11 (which xterm
+  // answers from the live theme) and re-theme. xterm.js doesn't implement 2031, so
+  // we do it here. Claude Code and other indexed-palette TUIs don't need this —
+  // xterm remaps their cells on a theme swap for free; only truecolor TUIs go stale.
+  const sendToPty = (data: string): boolean => {
+    const socket = resource.socket;
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify({ type: 'input', data }));
+    return true;
+  };
+  term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
+    if (params.includes(2031)) resource.wants2031 = true;
+    return false; // observe only — let xterm handle this DECSET (and every other) normally
+  });
+  term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
+    if (params.includes(2031)) resource.wants2031 = false; // app left 2031 (e.g. opencode quit)
+    return false;
+  });
+  term.parser.registerCsiHandler({ prefix: '?', intermediates: '$', final: 'p' }, (params) => {
+    if (params[0] !== 2031) return false; // DECRQM for any other mode: let xterm answer it
+    sendToPty(`\x1b[?2031;${resource.wants2031 ? 1 : 2}$y`); // report support so the app trusts our notifications
+    return true;
+  });
+  resource.lastSchemeSent = getActiveTheme().mode; // the app detects the right mode itself at spawn
+  resource.notifyColorScheme = (mode) => {
+    if (!resource.wants2031 || resource.lastSchemeSent === mode) return;
+    // 1 = dark, 2 = light. Only advance the dedup marker once it's actually delivered,
+    // so a flip made while the socket is down retries on the next theme change.
+    if (sendToPty(`\x1b[?997;${mode === 'dark' ? 1 : 2}n`)) resource.lastSchemeSent = mode;
+  };
   cache.set(key, resource);
   return resource;
 }
