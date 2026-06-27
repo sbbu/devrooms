@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { ConfirmProvider } from './Confirm';
 import { initTheme } from './themes';
 
 // Bootstrap only. All UI lives in ./App so that editing it during `pnpm dev`
@@ -11,4 +12,8 @@ import { initTheme } from './themes';
 // the first React paint so there's no flash of the default colors.
 initTheme();
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  <ConfirmProvider>
+    <App />
+  </ConfirmProvider>,
+);
