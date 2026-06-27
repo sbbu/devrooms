@@ -1150,73 +1150,106 @@ function SubagentsPanel({ room, presets }: { room: Room; presets: AgentPreset[] 
 }
 
 // Clone-a-room overlay. Its own modal (reusing the palette's .cmd-* chrome), opened
-// by ⌘N and the "clone room…" command — deliberately NOT a sub-mode of the command
-// palette, so Esc closes it outright. The branch field is pre-seeded with the source
-// repo's current branch so you can clone off it with zero typing, and edited freely.
-function NewRoomDialog({ open, onClose, projectName, defaultBranch, disabled, onClone }: {
+// by ⌘N, the sidebar "+ room" button, and the "clone room…" command — deliberately
+// NOT a sub-mode of the command palette, so Esc closes it outright. It's a searchable
+// branch picker (same UX as the branch switcher): the source repo's branches with the
+// current branch highlighted, so Enter clones off it with zero typing. Rooms are
+// auto-named after their branch — there is no name field.
+function NewRoomDialog({ open, onClose, projectName, defaultBranch, branchSourceRoomId, disabled, onClone }: {
   open: boolean;
   onClose: () => void;
   projectName?: string;
   defaultBranch: string;
+  branchSourceRoomId?: string;
   disabled?: boolean;
-  onClone: (name: string, branch: string) => void;
+  onClone: (branch: string) => void;
 }) {
-  const [branch, setBranch] = useState('');
-  const [name, setName] = useState('');
-  const branchRef = useRef<HTMLInputElement | null>(null);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [query, setQuery] = useState('');
+  const [index, setIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
-  // Read the latest default without making it a seed dependency, so a background
-  // rooms-poll that refreshes the current branch can't clobber an in-progress edit —
-  // we only (re)seed on the open transition.
+  // Read the latest values without making them effect deps, so a background rooms-poll
+  // (or a keystroke) can't reset the highlight while you navigate — we only seed once.
   const defaultBranchRef = useRef(defaultBranch);
   defaultBranchRef.current = defaultBranch;
+  const queryRef = useRef(query);
+  queryRef.current = query;
 
   useEffect(() => {
     if (!open) { restoreRef.current?.focus?.(); restoreRef.current = null; return undefined; }
     restoreRef.current = document.activeElement as HTMLElement | null;
-    setBranch(defaultBranchRef.current); setName('');
-    // Focus and select the seeded branch so Enter clones the current branch, while a
-    // single keystroke replaces it to clone/branch off something else.
-    const raf = requestAnimationFrame(() => { branchRef.current?.focus(); branchRef.current?.select(); });
-    return () => cancelAnimationFrame(raf);
-  }, [open]);
+    setQuery(''); setIndex(0); setBranches([]);
+    const raf = requestAnimationFrame(() => inputRef.current?.focus());
+    // Pull the source repo's branch list so the picker is searchable. Best-effort: if it
+    // fails or there's no ready room yet, you can still type a branch name to clone off.
+    let alive = true;
+    if (branchSourceRoomId) {
+      void api<GitStatus>(`/api/rooms/${branchSourceRoomId}/git/status`)
+        .then((g) => { if (alive) setBranches(g.branches ?? []); })
+        .catch(() => { /* free-text fallback */ });
+    }
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [open, branchSourceRoomId]);
+
+  // Once the branch list arrives (and you haven't started typing), highlight the
+  // current branch so Enter clones off it with no typing.
+  useEffect(() => {
+    if (!open || !branches.length || queryRef.current) return;
+    const i = branches.findIndex((b) => b.name === defaultBranchRef.current);
+    setIndex(i >= 0 ? i : 0);
+  }, [open, branches]);
+
+  const q = query.trim();
+  const base: BranchRow[] = branches.map((b) => ({
+    id: `cl:${b.name}`, title: b.name, age: relAge(b.committedAt), checked: b.name === defaultBranch,
+    act: () => { if (!disabled) { onClone(b.name); onClose(); } },
+  }));
+  let rows = q
+    ? base.map((r, i) => ({ r, s: score(q, r.title), i })).filter((e) => e.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((e) => e.r)
+    : base;
+  // Typed something that isn't an existing branch → offer to clone off it anyway (covers
+  // a repo whose branch list hasn't loaded, or an exact ref you know by name).
+  if (q && !branches.some((b) => b.name === q)) {
+    rows = [...rows, { id: '_type', title: `clone off “${q}”`, age: 'branch', act: () => { if (!disabled) { onClone(q); onClose(); } } }];
+  }
+  const idx = rows.length ? Math.min(index, rows.length - 1) : 0;
+  const activeId = rows[idx]?.id ?? null;
+  useEffect(() => { listRef.current?.querySelector('.cmd-row.sel')?.scrollIntoView({ block: 'nearest' }); }, [activeId]);
 
   if (!open) return null;
 
-  const submit = () => { if (disabled) return; onClone(name.trim(), branch.trim()); onClose(); };
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') { event.preventDefault(); submit(); }
+    if (event.key === 'ArrowDown') { event.preventDefault(); setIndex((i) => (rows.length ? (Math.min(i, rows.length - 1) + 1) % rows.length : 0)); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setIndex((i) => (rows.length ? (Math.min(i, rows.length - 1) - 1 + rows.length) % rows.length : 0)); }
+    else if (event.key === 'Enter') { event.preventDefault(); rows[idx]?.act(); }
     else if (event.key === 'Escape') { event.preventDefault(); onClose(); }
   };
 
   return (
     <div className="cmd-overlay" onMouseDown={onClose}>
-      <div className="cmd cmd-prompt" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="cmd" onMouseDown={(event) => event.stopPropagation()}>
         <div className="cmd-input">
           <span className="cmd-crumb">clone into {projectName ?? 'project'}<span className="cmd-crumb-sep">›</span></span>
-          <input
-            ref={branchRef}
-            value={branch}
-            onChange={(event) => setBranch(event.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="branch — defaults to the current branch"
-            spellCheck={false}
-            autoComplete="off"
-          />
+          <input ref={inputRef} value={query} onChange={(event) => { setQuery(event.target.value); setIndex(0); }} onKeyDown={onKeyDown}
+            placeholder="clone off a branch — search or type a name…" spellCheck={false} autoComplete="off" />
         </div>
-        <div className="cmd-input">
-          <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="name (optional — defaults to the branch)"
-            spellCheck={false}
-            autoComplete="off"
-          />
+        <div className="cmd-list" ref={listRef}>
+          {rows.length ? rows.map((row, i) => (
+            <div key={row.id} className={i === idx ? 'cmd-row sel' : 'cmd-row'} onMouseMove={() => setIndex(i)} onMouseDown={(event) => { event.preventDefault(); row.act(); }}>
+              <span className="cmd-main">
+                <span className="cmd-title">{row.title}</span>
+                {row.hint && <span className="cmd-hint">{row.hint}</span>}
+              </span>
+              {row.age && <span className="branch-age">{row.age}</span>}
+              {row.checked && <span className="cmd-check">●</span>}
+            </div>
+          )) : <div className="cmd-empty">no branches — type a name to clone off it</div>}
         </div>
         <div className="cmd-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
           <span><kbd>↵</kbd> clone room</span>
-          <span><kbd>tab</kbd> next field</span>
           <span><kbd>esc</kbd> cancel</span>
         </div>
       </div>
@@ -1235,9 +1268,6 @@ export function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('terminal');
-  const [roomName, setRoomName] = useState('');
-  const [roomBranch, setRoomBranch] = useState('');
-  const [showNewRoom, setShowNewRoom] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const confirm = useConfirm();
@@ -1293,6 +1323,13 @@ export function App() {
   const projectCurrentBranch = useMemo(() => {
     if (!selectedProject || selectedProject.repoUrl !== selectedProject.rootPath) return '';
     return rooms.find((room) => room.projectId === selectedProject.id && room.kind === 'main')?.branch ?? '';
+  }, [rooms, selectedProject]);
+  // A ready room of the selected project whose git the new-room picker can read the
+  // branch list from (every clone shares the repo's branches). Prefer the main repo.
+  const branchSourceRoomId = useMemo(() => {
+    if (!selectedProject) return undefined;
+    const inProject = rooms.filter((room) => room.projectId === selectedProject.id && room.status === 'idle');
+    return (inProject.find((room) => room.kind === 'main') ?? inProject[0])?.id;
   }, [rooms, selectedProject]);
   // Git state for the selected (ready) room — drives the branch toolbar in the
   // workspace header and the git panel below it from one shared source.
@@ -1430,13 +1467,13 @@ export function App() {
     finally { setBusy(false); }
   }
 
-  async function createRoom(name = roomName, branch = roomBranch) {
-    if (!selectedProject) return; // name is optional — the server derives it from the branch / auto
+  async function createRoom(branch?: string) {
+    if (!selectedProject) return; // rooms are auto-named — the server derives the name from the branch
     setBusy(true); setError(null);
     try {
-      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ name: name.trim() || undefined, branch: branch.trim() || undefined }) });
+      const data = await api<{ room: Room }>(`/api/projects/${selectedProject.id}/rooms`, { method: 'POST', body: JSON.stringify({ branch: branch?.trim() || undefined }) });
       setSelectedRoomId(data.room.id);
-      setShowNewRoom(false);
+      setShowCloneRoom(false);
       await refresh();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
@@ -1668,17 +1705,9 @@ export function App() {
           ) : <div className="empty">no projects yet — hit + project</div>}
 
           <div className="addbar">
-            <button title={`new room (${MOD_KEY}N)`} onClick={() => { setRoomBranch(projectCurrentBranch); if (miniRail) { if (!forcedMini) expandRail(); setShowNewRoom(true); } else { setShowNewRoom((value) => !value); } }}>+ room<span className="kbd-hint">{MOD_KEY}N</span></button>
+            <button title={`new room (${MOD_KEY}N)`} disabled={!selectedProject} onClick={() => { if (miniRail && !forcedMini) expandRail(); setShowCloneRoom(true); }}>+ room<span className="kbd-hint">{MOD_KEY}N</span></button>
             <button title={`add project from folder (${MOD_SHIFT}N)`} disabled={busy} onClick={pickProjectFolder}>+ project<span className="kbd-hint">{MOD_SHIFT}N</span></button>
           </div>
-          {showNewRoom && (
-            <div className="addform">
-              <span className="target">clone into {selectedProject?.name ?? 'no project'}</span>
-              <input value={roomBranch} onChange={(event) => setRoomBranch(event.target.value)} placeholder="branch — defaults to the current branch" />
-              <input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="name (optional — defaults to the branch)" />
-              <button className="go" disabled={busy || !selectedProject} onClick={() => createRoom()}>clone room</button>
-            </div>
-          )}
         </aside>
 
         <section className="ws">
@@ -1739,8 +1768,9 @@ export function App() {
         onClose={() => setShowCloneRoom(false)}
         projectName={selectedProject?.name}
         defaultBranch={projectCurrentBranch}
+        branchSourceRoomId={branchSourceRoomId}
         disabled={!selectedProject}
-        onClone={(name, branch) => { void createRoom(name, branch); }}
+        onClone={(branch) => { void createRoom(branch); }}
       />
     </div>
   );

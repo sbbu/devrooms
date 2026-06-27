@@ -197,15 +197,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .row-sel .glyph.thinking, .row-sel .glyph.attention, .row-sel .glyph.needs-input { color: var(--base); }
 
 .addbar { display: flex; gap: 18px; padding: 12px 12px 4px; }
-.addform {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 6px 12px 4px;
-}
-.addform .target { color: var(--dim); font-size: 11px; }
-.addform .go { align-self: flex-start; color: var(--cyan); padding-top: 2px; }
-.addform .go:disabled { color: var(--faint); }
 
 /* ── mini rail (collapsed sidebar) ─────────────────────────────────
    data-rail="mini" snaps the column to 48px (instant — one clean xterm refit).
@@ -249,7 +240,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button::before { font-size: 13px; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button:first-child::before { content: "+"; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button:last-child::before { content: "\229E"; } /* ⊞ */
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addform { display: none; }
 
 /* proc state survives as a corner dot (count text returns on peek / tooltip) */
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node[data-proc]::after { content: ""; height: 5px; position: absolute; right: 8px; top: 4px; width: 5px; }
