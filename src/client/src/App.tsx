@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { CommandPalette, score, type Command } from './CommandPalette';
+import { useConfirm } from './Confirm';
 import { getActiveTheme, getConfig, resolveTheme, subscribe, type Mode } from './themes';
 import hljs from 'highlight.js/lib/common';
 
@@ -578,6 +579,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
   const [committing, setCommitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const masterRef = useRef<HTMLInputElement | null>(null);
+  const confirm = useConfirm();
 
   useEffect(() => {
     setExcluded((prev) => { const next = new Set<string>(); for (const file of files) if (prev.has(file.path)) next.add(file.path); return next; });
@@ -596,6 +598,10 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      // Any open overlay (palette, branch menu, confirm popup) owns the arrow keys —
+      // don't move file selection underneath it, even during the brief gap before the
+      // overlay has taken focus.
+      if (document.querySelector('.cmd-overlay')) return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
       if (!files.length) return;
@@ -635,7 +641,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
   }
 
   async function discardFile(path: string) {
-    if (!window.confirm(`Discard changes to ${path}? This can't be undone.`)) return;
+    if (!(await confirm({ title: `Discard changes to ${path}?`, detail: "This can't be undone.", confirmLabel: 'discard', danger: true }))) return;
     setError(null);
     try {
       await api(`/api/rooms/${room.id}/git/discard`, { method: 'POST', body: JSON.stringify({ path }) });
@@ -645,7 +651,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
 
   async function discardAll() {
     if (!files.length) return;
-    if (!window.confirm(`Discard all ${files.length} uncommitted change${files.length === 1 ? '' : 's'}? This can't be undone.`)) return;
+    if (!(await confirm({ title: `Discard all ${files.length} uncommitted change${files.length === 1 ? '' : 's'}?`, detail: "This can't be undone.", confirmLabel: 'discard all', danger: true }))) return;
     setError(null);
     try {
       await api(`/api/rooms/${room.id}/git/discard-all`, { method: 'POST', body: JSON.stringify({}) });
@@ -1004,6 +1010,7 @@ function BranchMenu({ open, onClose, current, branches, canMerge, onCheckout, on
 
 function GitBar({ git }: { git: GitRoom }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const confirm = useConfirm();
   const { branch, otherBranches, merging, conflicts, syncing, syncOp, syncLabel, syncTitle, behind, unpushed, doOp, gitOp } = git;
   // The global ⌘⇧B shortcut and the "git: branch…" palette command open this menu.
   useEffect(() => {
@@ -1043,7 +1050,7 @@ function GitBar({ git }: { git: GitRoom }) {
         canMerge={!merging && otherBranches.length > 0}
         onCheckout={(name) => gitOp('checkout', { branch: name })}
         onCreate={(name) => gitOp('checkout-new', { branch: name })}
-        onMerge={(name) => { if (window.confirm(`merge ${name} into ${branch}?`)) gitOp('merge', { branch: name }); }}
+        onMerge={async (name) => { if (await confirm({ title: `Merge ${name} into ${branch}?`, detail: 'Combines its commits into the current branch.', confirmLabel: 'merge' })) gitOp('merge', { branch: name }); }}
       />
     </span>
   );
@@ -1233,6 +1240,7 @@ export function App() {
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const confirm = useConfirm();
   const [paletteOpen, setPaletteOpen] = useState(false);
   // The clone-room form is its own overlay (⌘N / the "clone room…" command open it),
   // not a sub-mode of the command palette — so Esc closes it outright instead of
@@ -1264,6 +1272,10 @@ export function App() {
       if (mod && !event.altKey && (event.code === 'KeyP' || event.code === 'KeyK')) {
         event.preventDefault();
         event.stopPropagation();
+        // A confirm popup is modal: swallow the toggle so ⌘P/⌘K can't pop the palette
+        // over it and steal its keyboard (the native confirm it replaced blocked the
+        // event loop entirely). The palette's own ⌘P-to-close still works.
+        if (document.querySelector('.cmd-confirm')) return;
         setPaletteOpen((open) => !open);
       }
     };
@@ -1433,7 +1445,12 @@ export function App() {
   async function deleteSelectedRoom() {
     if (!selectedRoom) return;
     const deleteFiles = selectedRoom.kind !== 'main';
-    const really = window.confirm(deleteFiles ? `Remove ${selectedRoom.name} from devrooms and delete its files?` : `Remove ${selectedRoom.name} from devrooms? The main repo files will be left untouched.`);
+    const really = await confirm({
+      title: `Remove ${selectedRoom.name} from devrooms?`,
+      detail: deleteFiles ? "Its cloned files will be deleted too — this can't be undone." : 'The main repo files will be left untouched.',
+      confirmLabel: deleteFiles ? 'remove & delete files' : 'remove room',
+      danger: true,
+    });
     if (!really) return;
     setBusy(true); setError(null);
     try {
@@ -1464,7 +1481,7 @@ export function App() {
       const res = await api<{ ok: boolean; busy?: boolean; proc?: string }>(`/api/rooms/${selectedRoom.id}/terminals/${terminalId}${force ? '?force=1' : ''}`, { method: 'DELETE' });
       // The server refuses if the terminal is running something — confirm, then force.
       if (res.busy) {
-        if (window.confirm(`"${res.proc}" is still running in this terminal — close it anyway?`)) await closeTerminal(terminalId, true);
+        if (await confirm({ title: `“${res.proc}” is still running in this terminal.`, detail: 'Close it anyway?', confirmLabel: 'close terminal', danger: true })) await closeTerminal(terminalId, true);
         return;
       }
       disposeTerminalResource(`room:${selectedRoom.id}:${terminalId}`);

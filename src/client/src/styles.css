@@ -575,3 +575,15 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .cmd-empty { color: var(--dim); padding: 16px 12px; }
 .cmd-foot { border-top: 1px solid var(--hairline); color: var(--dim); display: flex; font-size: 11px; gap: 16px; padding: 6px 12px; }
 .cmd-foot kbd { background: var(--surface); border: 1px solid var(--hairline); color: var(--dim); font: inherit; font-size: 10px; margin-right: 3px; padding: 0 4px; }
+
+/* The confirm popup reuses the palette chrome (.cmd-overlay/.cmd/.cmd-list/.cmd-row/
+   .cmd-foot) — only the question header and the destructive-action tint are new. */
+.cmd-confirm { width: min(440px, calc(100vw - 48px)); }
+.cmd-confirm:focus { outline: none; }
+.cmd-confirm-head { border-bottom: 1px solid var(--hairline); padding: 11px 12px; }
+.cmd-confirm-title { color: var(--fg); font-size: 14px; }
+.cmd-confirm-detail { color: var(--dim); font-size: 12px; margin-top: 4px; }
+.cmd-confirm .cmd-list { padding: 6px 0; }
+.cmd-row.danger .cmd-title { color: var(--red); }
+.cmd-row.sel.danger { box-shadow: inset 2px 0 0 var(--red); }
+.cmd-row.sel.danger .cmd-title { color: var(--red); }
