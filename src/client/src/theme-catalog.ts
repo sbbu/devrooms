@@ -104,4 +104,26 @@ export const CURATED_THEMES: Theme[] = [
       terminal: { background: '#fafafa', foreground: '#383a42', cursor: '#4078f2', cursorAccent: '#fafafa', selectionBackground: '#e5e5e6', black: '#383a42', red: '#e45649', green: '#50a14f', yellow: '#c18401', blue: '#4078f2', magenta: '#a626a4', cyan: '#0184bc', white: '#fafafa', brightBlack: '#a0a1a7', brightRed: '#e45649', brightGreen: '#50a14f', brightYellow: '#c18401', brightBlue: '#4078f2', brightMagenta: '#a626a4', brightCyan: '#0184bc', brightWhite: '#ffffff' },
     },
   },
+  {
+    id: 'monokai-pro', name: 'Monokai Pro',
+    dark: { // Monokai Pro (Pro filter) — sky as the primary accent (red/green/yellow keep their slots)
+      ui: { base: '#2d2a2e', surface: '#403e41', hairline: '#3b383d', hairline2: '#5b595c', fg: '#fcfcfa', dim: '#939293', faint: '#727072', cyan: '#78dce8', yellow: '#ffd866', red: '#ff6188', green: '#a9dc76' },
+      terminal: { background: '#2d2a2e', foreground: '#fcfcfa', cursor: '#fcfcfa', cursorAccent: '#2d2a2e', selectionBackground: '#403e41', black: '#403e41', red: '#ff6188', green: '#a9dc76', yellow: '#ffd866', blue: '#fc9867', magenta: '#ab9df2', cyan: '#78dce8', white: '#fcfcfa', brightBlack: '#727072', brightRed: '#ff6188', brightGreen: '#a9dc76', brightYellow: '#ffd866', brightBlue: '#fc9867', brightMagenta: '#ab9df2', brightCyan: '#78dce8', brightWhite: '#fcfcfa' },
+    },
+    light: { // Monokai Pro Light — warm off-white base, signature hues darkened for white-on-fill legibility
+      ui: { base: '#faf4f2', surface: '#f2e9e6', hairline: '#e6dad5', hairline2: '#d0c1ba', fg: '#2d2a2e', dim: '#6e6a6b', faint: '#a59fa0', cyan: '#1a7e95', yellow: '#a3760a', red: '#d22a5e', green: '#4f8f2f' },
+      terminal: { background: '#faf4f2', foreground: '#2d2a2e', cursor: '#2d2a2e', cursorAccent: '#faf4f2', selectionBackground: '#e6dad5', black: '#2d2a2e', red: '#d22a5e', green: '#4f8f2f', yellow: '#a3760a', blue: '#cc6a33', magenta: '#7d5fc4', cyan: '#1a7e95', white: '#6e6a6b', brightBlack: '#a59fa0', brightRed: '#e14775', brightGreen: '#5fa33f', brightYellow: '#b3850f', brightBlue: '#e16032', brightMagenta: '#8f73d6', brightCyan: '#2497b0', brightWhite: '#2d2a2e' },
+    },
+  },
+  {
+    id: 'matrix', name: 'Matrix',
+    dark: { // green phosphor on black — a green-cast palette; red/yellow stay functional for errors/diffs
+      ui: { base: '#0a0e0a', surface: '#10180f', hairline: '#16291a', hairline2: '#27512f', fg: '#62e884', dim: '#3f9457', faint: '#2a5e3a', cyan: '#3ddc6b', yellow: '#cfe85c', red: '#f0566a', green: '#5af78e' },
+      terminal: { background: '#0a0e0a', foreground: '#62e884', cursor: '#3ddc6b', cursorAccent: '#0a0e0a', selectionBackground: '#1f4d2b', black: '#0f1a0f', red: '#f0566a', green: '#56e07d', yellow: '#c2e85c', blue: '#33c98a', magenta: '#73e6a6', cyan: '#3ddc6b', white: '#9af2b5', brightBlack: '#2a5e3a', brightRed: '#ff7080', brightGreen: '#74f59a', brightYellow: '#d6f06e', brightBlue: '#4fe0a0', brightMagenta: '#9af2c0', brightCyan: '#62e884', brightWhite: '#c8f7d8' },
+    },
+    light: { // "green on paper" — pale mint base, deep forest text, green accents darkened for white-on-fill legibility
+      ui: { base: '#f0f7f1', surface: '#e3efe4', hairline: '#d2e6d4', hairline2: '#b2d4b6', fg: '#123d1f', dim: '#3f7a4f', faint: '#86b394', cyan: '#1f8a3e', yellow: '#7a6512', red: '#c0392b', green: '#2e8b46' },
+      terminal: { background: '#f0f7f1', foreground: '#123d1f', cursor: '#1f8a3e', cursorAccent: '#f0f7f1', selectionBackground: '#cfe6d3', black: '#123d1f', red: '#c0392b', green: '#2e8b46', yellow: '#7a6512', blue: '#1f8a6a', magenta: '#3f8a5a', cyan: '#1f8a3e', white: '#d2e6d4', brightBlack: '#86b394', brightRed: '#d04437', brightGreen: '#36a052', brightYellow: '#8f7d18', brightBlue: '#268f70', brightMagenta: '#4f9a68', brightCyan: '#26953f', brightWhite: '#f0f7f1' },
+    },
+  },
 ];
