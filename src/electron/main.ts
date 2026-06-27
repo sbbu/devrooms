@@ -121,7 +121,7 @@ ipcMain.on('window:control', (event, action: unknown) => {
   if (!win) return;
   if (action === 'minimize') win.minimize();
   else if (action === 'close') win.close();
-  else if (action === 'fullscreen') win.setFullScreen(!win.isFullScreen());
+  else if (action === 'fullscreen') win.setSimpleFullScreen(!win.isSimpleFullScreen());
 });
 
 // The renderer pushes the active theme's base color here so the native window
@@ -151,7 +151,21 @@ function installAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },
-    { role: 'viewMenu' },
+    // Custom View menu instead of { role: 'viewMenu' }: keep reload (⌘R), force
+    // reload, devtools and zoom, but route Full Screen through simple fullscreen so
+    // the frameless window covers the whole display (no reserved menu-bar strip /
+    // black gap that native fullscreen leaves on a borderless window).
+    { label: 'View', submenu: [
+      { role: 'reload' },
+      { role: 'forceReload' },
+      { role: 'toggleDevTools' },
+      { type: 'separator' },
+      { role: 'resetZoom' },
+      { role: 'zoomIn' },
+      { role: 'zoomOut' },
+      { type: 'separator' },
+      { label: 'Toggle Full Screen', accelerator: 'Control+Command+F', click: () => { const win = BrowserWindow.getFocusedWindow(); win?.setSimpleFullScreen(!win.isSimpleFullScreen()); } },
+    ] },
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
   ]));
 }
