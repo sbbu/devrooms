@@ -762,7 +762,20 @@ async function materializeRoom(project: Project, room: Room) {
     await run('git', ['fetch', 'origin', '--prune'], room.path).catch(() => { /* offline: keep local refs */ });
     // Record the branch git actually checked out (the repo default when none was
     // requested), so the room label and status reflect reality.
-    room.branch = (await currentBranch(room).catch(() => undefined)) || room.branch;
+    const checkedOut = (await currentBranch(room).catch(() => undefined)) || room.branch;
+    room.branch = checkedOut;
+    // Cloning a *local* folder checks out THAT working copy's branch, which can carry
+    // local-only commits the source never pushed. A new room should be the branch as it
+    // is on the remote, so hard-reset it to origin/<branch> (safe — the clone has no
+    // work yet). Only when the branch exists on origin: a purely local branch (or a
+    // detached tag checkout) has no remote counterpart to match, so leave it alone.
+    if (checkedOut && checkedOut !== 'HEAD') {
+      const onOrigin = await run('git', ['rev-parse', '--verify', '--quiet', `origin/${checkedOut}`], room.path).catch(() => null);
+      if (onOrigin?.exitCode === 0) {
+        await run('git', ['reset', '--hard', `origin/${checkedOut}`], room.path)
+          .catch((error) => console.error(`devrooms: reset ${checkedOut} to origin failed`, error));
+      }
+    }
     // Carry over the source repo's gitignored .env files (the clone won't have them).
     if (project.rootPath) {
       const copied = await copyEnvFiles(project.rootPath, room.path).catch((error) => { console.error('devrooms: .env copy failed', error); return 0; });
