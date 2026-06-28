@@ -296,12 +296,38 @@ function getTerminalResource(key: string) {
   term.loadAddon(fit);
   // Make http(s) URLs clickable. Uses xterm's built-in link provider (no addon) and
   // opens via window.open → the Electron main's setWindowOpenHandler → shell.openExternal
-  // (i.e. the system browser). Single-line matching, which covers the common case.
+  // (i.e. the system browser). A URL that's wider than the terminal soft-wraps onto the
+  // next row(s); xterm stores each row as its own buffer line (the continuations marked
+  // isWrapped). So we rebuild the whole logical line from its wrapped rows, match across
+  // it, then map each hit back to per-row ranges so the link spans the wrap correctly.
   term.registerLinkProvider({
     provideLinks(lineNo, callback) {
-      const line = term.buffer.active.getLine(lineNo - 1);
-      if (!line) { callback(undefined); return; }
-      const text = line.translateToString(true);
+      const buf = term.buffer.active;
+      // Walk up to the first row of the logical line (the one that isn't a continuation).
+      const MAX_ROWS = 256; // bound the reconstruction for pathologically long lines
+      let startRow = lineNo - 1;
+      for (let n = 0; startRow > 0 && buf.getLine(startRow)?.isWrapped && n < MAX_ROWS; n++) startRow--;
+      // Collect this logical line's rows and their text (full width, so concatenation is
+      // seamless across the wrap point — no spurious gap or space is introduced).
+      const rowIndices: number[] = [];
+      const rowTexts: string[] = [];
+      for (let i = startRow; rowIndices.length < MAX_ROWS; i++) {
+        const l = buf.getLine(i);
+        if (!l || (i > startRow && !l.isWrapped)) break;
+        rowIndices.push(i);
+        rowTexts.push(l.translateToString(false));
+      }
+      const text = rowTexts.join('');
+      // Map a 0-based offset in the joined text back to a 1-based {x, y} buffer cell.
+      const locate = (offset: number) => {
+        let acc = 0;
+        for (let r = 0; r < rowTexts.length; r++) {
+          if (offset < acc + rowTexts[r].length) return { x: offset - acc + 1, y: rowIndices[r] + 1 };
+          acc += rowTexts[r].length;
+        }
+        const last = rowTexts.length - 1;
+        return { x: rowTexts[last].length, y: rowIndices[last] + 1 };
+      };
       const links: { range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string; activate: () => void }[] = [];
       const re = /https?:\/\/[^\s"'`<>()[\]{}]+/g;
       let m: RegExpExecArray | null;
@@ -309,7 +335,7 @@ function getTerminalResource(key: string) {
         const uri = m[0].replace(/[.,;:!?]+$/, ''); // drop trailing sentence punctuation
         if (uri.length < 'https://'.length) continue;
         links.push({
-          range: { start: { x: m.index + 1, y: lineNo }, end: { x: m.index + uri.length, y: lineNo } },
+          range: { start: locate(m.index), end: locate(m.index + uri.length - 1) },
           text: uri,
           activate: () => { window.open(uri, '_blank', 'noopener,noreferrer'); },
         });
