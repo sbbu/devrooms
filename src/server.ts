@@ -1639,6 +1639,20 @@ async function main() {
         // Revert all tracked changes and remove every untracked file (destructive).
         await run('git', ['reset', '--hard', 'HEAD'], room.path); // best-effort: errors only in a commit-less repo
         result = await runGit(room, ['clean', '-fd']);
+      } else if (op === 'revert') {
+        // Create a NEW commit that undoes <hash> (git revert) — non-destructive:
+        // history is preserved and nothing is rewritten or force-pushed. Kept atomic:
+        // if it can't apply cleanly we abort the half-applied revert so the room never
+        // gets stuck mid-revert (the panel only drives MERGE_HEAD conflicts, not
+        // REVERT_HEAD), and report it as a handled outcome with no changes made.
+        const hash = requireString(req.body?.hash, 'hash');
+        if (!/^[0-9a-f]{4,40}$/i.test(hash)) throw new HttpError(400, 'invalid commit hash');
+        const attempt = await run('git', ['revert', '--no-edit', hash], room.path, { timeoutMs: 60_000 });
+        if (attempt.exitCode !== 0) {
+          await run('git', ['revert', '--abort'], room.path).catch(() => undefined); // best effort; no-op if no revert started
+          throw new HttpError(409, (attempt.stderr || attempt.stdout || '').trim() || 'could not revert that commit cleanly — no changes were made');
+        }
+        result = attempt;
       } else if (op === 'merge-abort') {
         // Throw away the in-progress merge, returning to the pre-pull state.
         result = await runGit(room, ['merge', '--abort']);

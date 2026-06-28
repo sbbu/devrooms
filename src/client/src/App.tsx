@@ -726,13 +726,32 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
   );
 }
 
-function HistoryView({ room, reloadKey }: { room: Room; reloadKey: number }) {
+function HistoryView({ room, git }: { room: Room; git: GitRoom }) {
+  const { reloadKey } = git;
+  const confirm = useConfirm();
   const [commits, setCommits] = useState<Commit[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<CommitDetail | null>(null);
   const [file, setFile] = useState<string | null>(null);
   const [diff, setDiff] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [reverting, setReverting] = useState(false);
+
+  // Undo a commit the safe way: a NEW commit that reverses it (git revert), so history
+  // is never rewritten. Feedback (and any conflict message) surfaces via the shared git
+  // op flow in the workspace header.
+  const revert = async () => {
+    if (!detail || reverting) return;
+    const ok = await confirm({
+      title: `Revert “${detail.subject}”?`,
+      detail: 'Creates a new commit that undoes this one. Your history is kept — nothing is rewritten.',
+      confirmLabel: 'revert commit',
+    });
+    if (!ok) return;
+    setReverting(true);
+    try { await git.doOp('revert', { hash: detail.hash }); }
+    finally { setReverting(false); }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -796,7 +815,10 @@ function HistoryView({ room, reloadKey }: { room: Room; reloadKey: number }) {
         {detail ? (
           <>
             <div className="commit-detail-head">
-              <div className="cd-subject">{detail.subject}</div>
+              <div className="cd-top">
+                <div className="cd-subject">{detail.subject}</div>
+                <button className="cd-revert" disabled={reverting} title={`create a new commit that undoes ${detail.short}`} onClick={revert}>{reverting ? 'reverting…' : 'revert'}</button>
+              </div>
               {detail.body && <div className="cd-body">{detail.body}</div>}
               <div className="cd-meta"><span>{detail.author}</span><span>{relTime(detail.date)}</span><span className="chash">{detail.short}</span><span>{detail.files.length} file{detail.files.length === 1 ? '' : 's'}</span></div>
             </div>
@@ -1103,7 +1125,7 @@ function GitPanel({ room, git }: { room: Room; git: GitRoom }) {
       </div>
       {view === 'changes'
         ? <ChangesView room={room} status={git.status} branch={git.branch} onCommitted={() => { git.refresh(); }} />
-        : <HistoryView room={room} reloadKey={git.reloadKey} />}
+        : <HistoryView room={room} git={git} />}
     </div>
   );
 }

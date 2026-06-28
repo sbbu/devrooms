@@ -405,7 +405,11 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .chash { font-size: 11px; }
 
 .commit-detail-head { border-bottom: 1px solid var(--hairline); padding: 8px 12px; }
-.cd-subject { color: var(--fg); }
+.cd-top { align-items: baseline; display: flex; gap: 12px; }
+.cd-subject { color: var(--fg); flex: 1; min-width: 0; }
+.cd-revert { border: 1px solid var(--hairline-2); color: var(--fg); flex: none; padding: 2px 10px; }
+.cd-revert:hover:not(:disabled) { background: var(--surface); color: var(--red); }
+.cd-revert:disabled { color: var(--faint); }
 .cd-body { color: var(--dim); font-size: 12px; margin-top: 4px; white-space: pre-wrap; }
 .cd-meta { color: var(--dim); display: flex; flex-wrap: wrap; font-size: 11px; gap: 14px; margin-top: 6px; }
 .cd-files { border-bottom: 1px solid var(--hairline); max-height: 180px; overflow: auto; padding: 3px 0; }
