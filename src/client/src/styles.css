@@ -163,7 +163,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .rtop { align-items: baseline; display: flex; gap: 7px; min-width: 0; }
 .room-node .rname { color: var(--fg); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rtop .gitstate { margin-left: auto; }
-.rtop .count2 { color: var(--yellow); flex: none; }
 .rsub { align-items: baseline; display: flex; gap: 7px; min-width: 0; }
 .room-node .rbranch { color: var(--dim); flex: 0 1 auto; font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rsub .kind { color: var(--faint); flex: none; font-size: 11px; margin-left: auto; }
@@ -179,7 +178,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .row-sel .rname,
 .row-sel .rbranch,
 .row-sel .kind,
-.row-sel .count2,
 .row-sel .mark,
 .row-sel .glyph { color: var(--base); }
 .row-sel .gs-conflict, .row-sel .gs-dirty, .row-sel .gs-pull, .row-sel .gs-push { color: var(--base); }
@@ -241,12 +239,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button:first-child::before { content: "+"; }
 .split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .addbar button:last-child::before { content: "\229E"; } /* ⊞ */
 
-/* proc state survives as a corner dot (count text returns on peek / tooltip) */
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node[data-proc]::after { content: ""; height: 5px; position: absolute; right: 8px; top: 4px; width: 5px; }
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node[data-proc="run"]::after { background: var(--green); }
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node[data-proc="lost"]::after { background: var(--yellow); }
-.split[data-rail="mini"] .sidebar:not(:hover):not(:has(:focus-visible)) .room-node.row-sel::after { display: none; } /* don't fight the cyan fill */
-
 /* monogram colors: light by default, cyan for the active project, base on the
    selected room's cyan block (this last one beats the .mark rule's specificity) */
 .split[data-rail="mini"] .mark { color: var(--fg); }
@@ -293,7 +285,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .tpane-x:hover { color: var(--red); }
 
 /* ── git panel ─────────────────────────────────────────────────── */
-.git, .subs { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.git { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
 
 /* git branch toolbar — inline in the workspace header's tab row */
 .headgit { align-items: center; color: var(--dim); display: flex; flex-wrap: wrap; gap: 12px; margin-left: 16px; }
@@ -423,32 +415,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .cd-file .p { color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
 .cd-file.sel .p { color: var(--cyan); }
 
-/* ── subagents ─────────────────────────────────────────────────── */
-.presets { border-bottom: 1px solid var(--hairline); display: flex; flex-wrap: wrap; gap: 5px 22px; padding: 8px 12px; }
-.preset { align-items: baseline; display: flex; gap: 9px; }
-.preset .l { color: var(--fg); }
-.preset:hover .l { color: var(--cyan); }
-.preset .c { color: var(--dim); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.preset.off { opacity: 0.5; }
-
-.launcher { border-bottom: 1px solid var(--hairline); display: flex; gap: 8px; padding: 8px 12px; }
-.launcher .name { width: 150px; }
-.launcher .cmd { flex: 1; }
-
-.proclist { border-bottom: 1px solid var(--hairline); max-height: 200px; overflow: auto; padding: 3px 0; }
-.proc { align-items: center; display: flex; gap: 12px; padding: 3px 12px; }
-.proc.sel { background: var(--surface); box-shadow: inset 2px 0 0 var(--cyan); }
-.proc .acts { color: var(--dim); display: flex; gap: 10px; }
-.proc .pname { color: var(--fg); }
-.proc .pcmd { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.proc .st { font-size: 11px; }
-.st.running { color: var(--green); }
-.st.exited { color: var(--dim); }
-.st.lost { color: var(--yellow); }
-
-.attached { display: flex; flex: 1; min-height: 0; }
-.attached .terminal { padding: 0; }
-
 /* ── status bar (the HUD) ──────────────────────────────────────── */
 .statusbar {
   align-items: center;
@@ -492,12 +458,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   .chg-left, .hist-list { border-bottom: 1px solid var(--hairline); border-right: 0; max-height: 240px; }
 }
 
-/* let the tab bar and the git/launcher rows wrap instead of overflowing */
+/* let the tab bar and the git row wrap instead of overflowing */
 @container ws (max-width: 520px) {
   .tabs { flex-wrap: wrap; }
   .headgit { margin-left: 0; }
-  .launcher { flex-wrap: wrap; }
-  .launcher .name { flex: 1; width: auto; }
 }
 
 /* drop the least-critical HUD segments (host:port, uptime) on a narrow window */

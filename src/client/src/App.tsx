@@ -26,13 +26,9 @@ type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: stri
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
 type CommitFile = { status: string; path: string };
 type CommitDetail = Commit & { body: string; files: CommitFile[] };
-type ManagedProcess = { id: string; roomId: string; name: string; command: string; status: 'running' | 'exited' | 'lost'; startedAt: string; exitedAt?: string; exitCode?: number; logTail: string };
-type AgentPreset = { id: string; label: string; description: string; command: string; available: boolean };
 type Meta = { name: string; version: string; startedAt: string; uptimeSeconds: number; pid: number; platform: string; node: string; bindHost: string; port: number; home: string; roomsRoot: string; projectCount: number; roomCount: number; processCount: number; runningProcessCount: number };
-type ProcessCount = { lost: number; running: number; total: number };
-type ProcessCounts = Record<string, ProcessCount>;
 
-type Tab = 'terminal' | 'git' | 'subagents';
+type Tab = 'terminal' | 'git';
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) } });
@@ -56,13 +52,6 @@ function formatUptime(seconds: number) {
   const hours = Math.floor(minutes / 60);
   if (hours < 1) return `${minutes}m`;
   return `${hours}h ${minutes % 60}m`;
-}
-
-function compactProc(count?: ProcessCount) {
-  if (!count?.total) return '';
-  if (count.running) return `${count.running} run`;
-  if (count.lost) return `${count.lost} lost`;
-  return `${count.total} done`;
 }
 
 // A 2-char monogram for the mini rail: first letter of the first two segments
@@ -913,7 +902,7 @@ function useGitRoom(room: Room | null) {
 type GitRoom = ReturnType<typeof useGitRoom>;
 
 // The branch / sync / merge toolbar. Lives in the workspace header so it's
-// available on every tab (terminal, git, subagents), not just the git tab.
+// available on every tab (terminal, git), not just the git tab.
 // A searchable branch action menu (palette-style, reusing the .cmd-* UI): switch
 // branch (recency-sorted — abandoned ones sink), a "merge a branch in…" submode,
 // and inline "create branch '<typed>'". Replaces the old branch select + merge
@@ -1093,62 +1082,6 @@ function GitPanel({ room, git }: { room: Room; git: GitRoom }) {
   );
 }
 
-function SubagentsPanel({ room, presets }: { room: Room; presets: AgentPreset[] }) {
-  const [processes, setProcesses] = useState<ManagedProcess[]>([]);
-  const [command, setCommand] = useState('hermes chat --tui --source devrooms --accept-hooks --pass-session-id');
-  const [name, setName] = useState('Hermes TUI');
-  const [attached, setAttached] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${room.id}/processes`);
-    setProcesses(data.processes);
-  }
-  useEffect(() => { refresh().catch((err) => setError(err.message)); const timer = setInterval(() => refresh().catch(() => undefined), 3000); return () => clearInterval(timer); }, [room.id]);
-  async function start() {
-    setError(null);
-    const data = await api<{ process: ManagedProcess }>(`/api/rooms/${room.id}/processes`, { method: 'POST', body: JSON.stringify({ command, name }) });
-    setAttached(data.process.id);
-    await refresh();
-  }
-  async function kill(processId: string) { await api(`/api/processes/${processId}`, { method: 'DELETE' }); await refresh(); }
-
-  return (
-    <div className="subs">
-      <div className="presets">
-        {presets.map((preset) => (
-          <button key={preset.id} className={preset.available ? 'preset' : 'preset off'} onClick={() => { setCommand(preset.command); setName(preset.label); }}>
-            <span className="l">{preset.label}</span>
-            <span className="c">{preset.available ? preset.command : `missing: ${preset.command}`}</span>
-          </button>
-        ))}
-      </div>
-      <div className="launcher">
-        <input className="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="process name" />
-        <input className="cmd" value={command} onChange={(event) => setCommand(event.target.value)} placeholder="command" />
-        <button disabled={!command.trim()} onClick={start}>start</button>
-      </div>
-      {error && <div className="error">{error}</div>}
-      <div className="proclist">
-        {processes.length ? processes.map((proc) => (
-          <div className={attached === proc.id ? 'proc sel' : 'proc'} key={proc.id}>
-            <span className="acts">
-              <button onClick={() => setAttached(proc.id)}>{proc.status === 'running' ? 'attach' : 'log'}</button>
-              <button onClick={() => kill(proc.id)}>{proc.status === 'running' ? 'kill' : 'dismiss'}</button>
-            </span>
-            <span className="pname">{proc.name}</span>
-            <span className="pcmd">{proc.command}</span>
-            <span className={`st ${proc.status}`}>{proc.status}{proc.exitCode !== undefined ? `:${proc.exitCode}` : ''}</span>
-          </div>
-        )) : <div className="empty">no room processes yet</div>}
-      </div>
-      <div className="attached">
-        {attached ? <TerminalPane processId={attached} /> : <div className="empty">start or attach a process to view its terminal</div>}
-      </div>
-    </div>
-  );
-}
-
 // Clone-a-room overlay. Its own modal (reusing the palette's .cmd-* chrome), opened
 // by ⌘N, the sidebar "+ room" button, and the "clone room…" command — deliberately
 // NOT a sub-mode of the command palette, so Esc closes it outright. It's a searchable
@@ -1260,11 +1193,8 @@ function NewRoomDialog({ open, onClose, projectName, defaultBranch, branchSource
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [presets, setPresets] = useState<AgentPreset[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
-  const [processCounts, setProcessCounts] = useState<ProcessCounts>({});
   const [gitSummary, setGitSummary] = useState<GitSummaries>({});
-  const [roomProcesses, setRoomProcesses] = useState<ManagedProcess[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('terminal');
@@ -1334,7 +1264,6 @@ export function App() {
   // Git state for the selected (ready) room — drives the branch toolbar in the
   // workspace header and the git panel below it from one shared source.
   const git = useGitRoom(selectedRoom?.status === 'idle' ? selectedRoom : null);
-  const runningCount = roomProcesses.filter((proc) => proc.status === 'running').length;
 
   // Effective collapse = user intent OR a too-narrow viewport. The width override
   // is never written back to railPref, so widening restores the saved intent.
@@ -1358,12 +1287,11 @@ export function App() {
   const shortcutHint = `${MOD}B`;
 
   async function refresh() {
-    const [projectData, presetData, metaData] = await Promise.all([
-      api<{ processCounts: ProcessCounts; projects: Project[]; rooms: Room[] }>('/api/projects'),
-      api<{ presets: AgentPreset[] }>('/api/presets'),
+    const [projectData, metaData] = await Promise.all([
+      api<{ projects: Project[]; rooms: Room[] }>('/api/projects'),
       api<Meta>('/api/meta'),
     ]);
-    setProjects(projectData.projects); setRooms(projectData.rooms); setProcessCounts(projectData.processCounts ?? {}); setPresets(presetData.presets); setMeta(metaData);
+    setProjects(projectData.projects); setRooms(projectData.rooms); setMeta(metaData);
     // Reconcile the terminal cache against the live rooms: dispose any resource whose
     // room is gone (covers deletes from another window and any path that didn't tidy up
     // explicitly), so a recreated same-id room never reattaches a dead terminal.
@@ -1438,18 +1366,6 @@ export function App() {
     window.addEventListener('devrooms:git', poll);
     return () => { alive = false; clearInterval(timer); window.removeEventListener('devrooms:git', poll); };
   }, []);
-
-  async function refreshRoomProcesses(roomId: string) {
-    const data = await api<{ processes: ManagedProcess[] }>(`/api/rooms/${roomId}/processes`);
-    setRoomProcesses(data.processes);
-  }
-
-  useEffect(() => {
-    if (!selectedRoom) { setRoomProcesses([]); return; }
-    refreshRoomProcesses(selectedRoom.id).catch(() => undefined);
-    const timer = setInterval(() => refreshRoomProcesses(selectedRoom.id).catch(() => undefined), 3000);
-    return () => clearInterval(timer);
-  }, [selectedRoom?.id]);
 
   async function pickProjectFolder() {
     const pick = window.devrooms?.pickDirectory;
@@ -1536,7 +1452,6 @@ export function App() {
   const commands: Command[] = [
     { id: 'go-terminal', title: 'go to terminal', hint: 'show the terminal tab', keywords: 'terminal shell view', shortcut: `${MOD}1`, perform: () => setTab('terminal') },
     { id: 'go-git', title: 'go to git', hint: 'show the git tab', keywords: 'git diff changes commit', shortcut: `${MOD}2`, perform: () => setTab('git') },
-    { id: 'go-subagents', title: 'go to subagents', hint: 'show the subagents tab', keywords: 'agents processes hermes claude codex', shortcut: `${MOD}3`, perform: () => setTab('subagents') },
     { id: 'refresh', title: 'refresh', hint: 'reload projects and rooms', keywords: 'reload sync', perform: () => { void refresh(); } },
     {
       id: 'new-room', title: 'clone room…',
@@ -1591,7 +1506,6 @@ export function App() {
     switch (event.code) {
       case 'Digit1': return hit(() => setTab('terminal'));
       case 'Digit2': return hit(() => setTab('git'));
-      case 'Digit3': return hit(() => setTab('subagents'));
       case 'KeyB': return hit(() => { if (shift) window.dispatchEvent(new Event('devrooms:branch-menu')); else toggleRail(); });
       case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { setShowCloneRoom(true); } });
       case 'KeyT': if (!shift && selectedRoom?.status === 'idle' && terminalCount < 6) return hit(() => { setTab('terminal'); void addTerminal(); }); return;
@@ -1654,22 +1568,19 @@ export function App() {
                     </button>
                     {projectRooms.map((room, index) => {
                       const last = index === projectRooms.length - 1;
-                      const pc = processCounts[room.id];
-                      const procLabel = compactProc(pc);
                       const mark = room.kind === 'main' ? room.name.charAt(0).toUpperCase() : room.name.charAt(0).toLowerCase();
                       // Lead with the derived activity label; the typed name stays the
                       // stable handle (shown muted alongside, and in the tooltip).
                       const display = room.label ?? room.name;
                       const gs = gitSummary[room.id];
                       const gitLabel = gs ? [gs.conflict ? 'merge conflict' : '', gs.dirty ? `${gs.dirty} uncommitted` : '', gs.behind ? `${gs.behind} to pull` : '', gs.unpushed ? `${gs.unpushed} to push` : ''].filter(Boolean).join(' · ') : '';
-                      const meta = `${room.branch ? room.branch + ' · ' : ''}${room.kind ?? 'clone'} · ${room.status}${procLabel ? ' · ' + procLabel : ''}${gitLabel ? ' · ' + gitLabel : ''}`;
+                      const meta = `${room.branch ? room.branch + ' · ' : ''}${room.kind ?? 'clone'} · ${room.status}${gitLabel ? ' · ' + gitLabel : ''}`;
                       return (
                         <button
                           key={room.id}
                           className={selectedRoom?.id === room.id ? 'node room-node row-sel' : 'node room-node'}
                           aria-label={`${display}${room.label ? ` (${room.name})` : ''} · ${meta}`}
                           title={`${display}${room.label ? ` (${room.name})` : ''} · ${meta}`}
-                          data-proc={pc?.running ? 'run' : pc?.lost ? 'lost' : undefined}
                           onClick={() => { setSelectedRoomId(room.id); setSelectedProjectId(room.projectId); }}
                         >
                           <span className="conn" aria-hidden="true">{last ? '└' : '├'}</span>
@@ -1687,7 +1598,6 @@ export function App() {
                                   {gs.unpushed > 0 && <span className="gs-push" title={`${gs.unpushed} to push`}>↑{gs.unpushed}</span>}
                                 </span>
                               )}
-                              {procLabel && <span className="count2">{procLabel}</span>}
                             </span>
                             <span className="rsub">
                               <span className="rbranch">{room.branch || 'main'}</span>
@@ -1719,7 +1629,6 @@ export function App() {
             <div className="tabs">
               <button className={tab === 'terminal' ? 'tab active' : 'tab'} onClick={() => setTab('terminal')} title={`terminal (${MOD_KEY}1)`}>terminal<span className="kbd-hint">{MOD_KEY}1</span></button>
               <button className={tab === 'git' ? 'tab active' : 'tab'} onClick={() => setTab('git')} title={`git (${MOD_KEY}2)`}>git<span className="kbd-hint">{MOD_KEY}2</span></button>
-              <button className={tab === 'subagents' ? 'tab active' : 'tab'} onClick={() => setTab('subagents')} title={`subagents (${MOD_KEY}3)`}>subagents<span className="kbd-hint">{MOD_KEY}3</span></button>
               {selectedRoom?.status === 'idle' && <GitBar git={git} />}
               <span className="spacer" />
               <span className="tab-actions">
@@ -1745,7 +1654,6 @@ export function App() {
             <div className="body">
               {tab === 'terminal' && <RoomTerminals room={selectedRoom} onClose={closeTerminal} />}
               {tab === 'git' && <GitPanel room={selectedRoom} git={git} />}
-              {tab === 'subagents' && <SubagentsPanel room={selectedRoom} presets={presets} />}
             </div>
           )}
         </section>
@@ -1755,7 +1663,6 @@ export function App() {
         <span className="brand">devrooms</span>
         {selectedRoom && <span className="seg">{selectedProject?.name}<span className="arrow">{'›'}</span><span className="b">{selectedRoom.name}</span></span>}
         {branchLabel && <span className="seg">{branchLabel}</span>}
-        <span className="seg">{'⏵'} {runningCount}/{roomProcesses.length} proc</span>
         <span className="spacer" />
         <button className="seg theme-seg" onClick={() => setPaletteOpen(true)} title="change theme (⌘p)"><span className="theme-chip" style={{ background: activeTheme.ui.cyan }} />{activeTheme.name.toLowerCase()}</button>
         {meta && <span className="seg">{meta.bindHost}:{meta.port}</span>}
