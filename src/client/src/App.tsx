@@ -1,7 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { CommandPalette, score, type Command } from './CommandPalette';
@@ -498,15 +497,6 @@ function TerminalPane({ roomId, processId, terminalId }: { roomId?: string; proc
     if (!resource.opened) {
       resource.term.open(resource.container);
       resource.opened = true;
-      // GPU renderer — roughly an order of magnitude faster than xterm's DOM renderer for
-      // the full-screen TUIs this app runs (claude-code, vim) and fast build-log output. On
-      // WebGL context loss, dispose the addon and xterm transparently reverts to the DOM
-      // renderer; if WebGL is unavailable at all we just stay on the DOM renderer.
-      try {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* reverts to DOM renderer */ } });
-        resource.term.loadAddon(webgl);
-      } catch { /* GPU/WebGL unavailable: stay on the DOM renderer */ }
     }
     resource.term.focus();
 

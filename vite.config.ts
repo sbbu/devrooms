@@ -34,7 +34,7 @@ export default defineConfig({
         // intentionally NOT listed — it is a lazy dynamic import with its own chunk.
         manualChunks: {
           react: ['react', 'react-dom', 'react/jsx-runtime'],
-          xterm: ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-webgl'],
+          xterm: ['@xterm/xterm', '@xterm/addon-fit'],
         },
       },
     },
