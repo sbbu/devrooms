@@ -1,12 +1,12 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { CommandPalette, score, type Command } from './CommandPalette';
 import { useConfirm } from './Confirm';
 import { getActiveTheme, getConfig, resolveTheme, subscribe, type Mode } from './themes';
-import hljs from 'highlight.js/lib/common';
 
 // Keyboard-shortcut modifier for hints + handlers: ⌘ on macOS (never reaches the
 // PTY, so shortcuts fire even with the terminal focused), Ctrl elsewhere.
@@ -126,12 +126,29 @@ const HL_EXT: Record<string, string> = {
   r: 'r', pl: 'perl', pm: 'perl', graphql: 'graphql', gql: 'graphql',
   diff: 'diff', patch: 'diff', make: 'makefile', mk: 'makefile', dockerfile: 'dockerfile',
 };
+// highlight.js/lib/common is ~162 KB raw / 54 KB gzip and is only ever used by the diff
+// view (behind the git tab), yet the default tab is the terminal — so on first paint it is
+// dead weight. Load it lazily on first diff render; until it resolves, diffs render as plain
+// (correctly structured) text and then fade in colors on the next tick.
+type Hljs = typeof import('highlight.js/lib/common')['default'];
+let hljs: Hljs | null = null;
+let hljsPromise: Promise<Hljs> | null = null;
+function ensureHljs(): Promise<Hljs> {
+  if (!hljsPromise) hljsPromise = import('highlight.js/lib/common').then((m) => (hljs = m.default));
+  return hljsPromise;
+}
+function useHljs(): boolean {
+  const [ready, setReady] = useState(!!hljs);
+  useEffect(() => { if (!hljs) void ensureHljs().then(() => setReady(true)); }, []);
+  return ready;
+}
+
 function langForPath(path: string | undefined): string | undefined {
   if (!path) return undefined;
   const base = path.slice(path.lastIndexOf('/') + 1);
   const key = (base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : base).toLowerCase();
   const lang = HL_EXT[key];
-  return lang && hljs.getLanguage(lang) ? lang : undefined;
+  return hljs && lang && hljs.getLanguage(lang) ? lang : undefined;
 }
 
 function parseDiff(text: string): DiffRow[] {
@@ -170,7 +187,7 @@ function parseDiff(text: string): DiffRow[] {
 // lines may mis-highlight an interior line — an acceptable trade-off for
 // line-based diffs. hljs escapes the text it emits, so the HTML is safe to inject.
 function highlightCode(code: string, lang?: string): ReactNode {
-  if (!code || !lang) return code;
+  if (!code || !lang || !hljs) return code;
   try {
     return <span dangerouslySetInnerHTML={{ __html: hljs.highlight(code, { language: lang, ignoreIllegals: true }).value }} />;
   } catch {
@@ -178,9 +195,14 @@ function highlightCode(code: string, lang?: string): ReactNode {
   }
 }
 
-function DiffView({ text, path }: { text: string; path?: string }) {
-  const rows = useMemo(() => parseDiff(text), [text]);
-  const fallbackLang = useMemo(() => langForPath(path), [path]);
+// memo + ready-gated useMemos: parseDiff and (the expensive) per-line highlight.js passes
+// only re-run when the diff text/path actually changes or hljs finishes loading — never on
+// the background pollers' frequent parent re-renders. `ready` is in BOTH deps because
+// parseDiff itself calls langForPath (which returns undefined until hljs is loaded).
+const DiffView = memo(function DiffView({ text, path }: { text: string; path?: string }) {
+  const ready = useHljs();
+  const rows = useMemo(() => parseDiff(text), [text, ready]);
+  const fallbackLang = useMemo(() => langForPath(path), [path, ready]);
   if (!text.trim()) return <div className="empty">no textual changes</div>;
   return (
     <div className="diff-table">
@@ -195,7 +217,7 @@ function DiffView({ text, path }: { text: string; path?: string }) {
       ))}
     </div>
   );
-}
+});
 
 type TerminalResource = {
   key: string;
@@ -211,6 +233,8 @@ type TerminalResource = {
   input?: { dispose(): void };
   reconnectTimer?: number;
   retries?: number;
+  lastSentCols?: number;                      // dedup PTY resize sends; reset per socket (initial + reconnect)
+  lastSentRows?: number;
   wants2031?: boolean;                       // app opted into DEC 2031 color-scheme notifications
   lastSchemeSent?: Mode;                      // dedup: only notify when light/dark actually flips
   notifyColorScheme?: (mode: Mode) => void;  // push a CSI ? 997 ; Ps n notification (themes.ts calls this)
@@ -438,6 +462,10 @@ async function connectTerminal(resource: TerminalResource, endpoint: string, sch
   const socket = new WebSocket(wsUrl(`${endpoint}?replay=${replay}`));
   resource.endpoint = endpoint;
   resource.socket = socket;
+  // Fresh socket ⇒ the PTY on the other end knows nothing about our size yet, so force the
+  // first fit after open to send (and re-sync after a reconnect/replay) by clearing the dedup.
+  resource.lastSentCols = undefined;
+  resource.lastSentRows = undefined;
   socket.addEventListener('open', () => { resource.retries = 0; scheduleFit(); });
   socket.addEventListener('message', (event) => {
     const msg = JSON.parse(event.data as string) as { type?: string; data?: string };
@@ -467,6 +495,15 @@ function TerminalPane({ roomId, processId, terminalId }: { roomId?: string; proc
     if (!resource.opened) {
       resource.term.open(resource.container);
       resource.opened = true;
+      // GPU renderer — roughly an order of magnitude faster than xterm's DOM renderer for
+      // the full-screen TUIs this app runs (claude-code, vim) and fast build-log output. On
+      // WebGL context loss, dispose the addon and xterm transparently reverts to the DOM
+      // renderer; if WebGL is unavailable at all we just stay on the DOM renderer.
+      try {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* reverts to DOM renderer */ } });
+        resource.term.loadAddon(webgl);
+      } catch { /* GPU/WebGL unavailable: stay on the DOM renderer */ }
     }
     resource.term.focus();
 
@@ -477,26 +514,36 @@ function TerminalPane({ roomId, processId, terminalId }: { roomId?: string; proc
       const cols = Math.max(2, proposed.cols - 1);
       const rows = Math.max(2, proposed.rows);
       if (resource.term.cols !== cols || resource.term.rows !== rows) resource.term.resize(cols, rows);
+      // Only notify the PTY when the size it knows about actually changed (deduped against
+      // the last dims sent on THIS socket, reset on connect/reconnect). The dozen-plus fits
+      // an attach used to fire (rAF + fonts.ready + observers) thus collapse to one SIGWINCH,
+      // killing the redraw flicker TUIs showed on every room switch / fullscreen toggle.
       const socket = resource.socket;
-      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: resource.term.cols, rows: resource.term.rows }));
+      if (socket?.readyState === WebSocket.OPEN
+        && (resource.lastSentCols !== resource.term.cols || resource.lastSentRows !== resource.term.rows)) {
+        socket.send(JSON.stringify({ type: 'resize', cols: resource.term.cols, rows: resource.term.rows }));
+        resource.lastSentCols = resource.term.cols;
+        resource.lastSentRows = resource.term.rows;
+      }
     };
+    // One pending rAF coalesces a burst of triggers into a single fit (the send-dedup above
+    // then drops any that produce no size change). No more stacked double-rAF + 50ms timer.
+    let fitRaf = 0;
     const scheduleFit = () => {
-      requestAnimationFrame(() => {
-        fitAndResize();
-        requestAnimationFrame(fitAndResize);
-        window.setTimeout(fitAndResize, 50);
-      });
+      if (fitRaf) return;
+      fitRaf = requestAnimationFrame(() => { fitRaf = 0; fitAndResize(); });
     };
     fitAndResize();
     void connectTerminal(resource, target.endpoint, scheduleFit, false, target.ensure);
+    // Observe only host — container fills it, so observing both just double-fires per layout.
     const observer = new ResizeObserver(scheduleFit);
     observer.observe(host);
-    observer.observe(resource.container);
     window.addEventListener('resize', scheduleFit);
     document.fonts?.ready.then(scheduleFit).catch(() => undefined);
     scheduleFit();
     return () => {
       disposed = true;
+      if (fitRaf) cancelAnimationFrame(fitRaf);
       observer.disconnect();
       window.removeEventListener('resize', scheduleFit);
       if (host.contains(resource.container)) host.removeChild(resource.container);
@@ -864,12 +911,24 @@ function useGitRoom(room: Room | null) {
   // Reset transient state and refetch on room change (clearing status first so the
   // header never flashes the previous room's branch).
   useEffect(() => { setPushRejected(false); setNote(''); setError(null); setStatus(null); refresh(); }, [roomId, refresh]);
+  // Self-scheduling (not setInterval) so a slow git status never lets the next poll stack
+  // on top of it, and gated on document.hidden so a backgrounded/occluded window stops
+  // spawning git. Refetch immediately on focus / becoming visible so nothing looks stale.
+  // The initial fetch is the effect above (888); first tick is scheduled at 4s.
   useEffect(() => {
     if (!roomId) return undefined;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
     const onFocus = () => { refresh(); };
+    const onVis = () => { if (!document.hidden) refresh(); };
+    const tick = async () => {
+      if (!document.hidden) await refresh();
+      if (alive) timer = setTimeout(tick, 4000);
+    };
     window.addEventListener('focus', onFocus);
-    const timer = window.setInterval(() => { refresh(); }, 4000);
-    return () => { window.removeEventListener('focus', onFocus); window.clearInterval(timer); };
+    document.addEventListener('visibilitychange', onVis);
+    timer = setTimeout(tick, 4000);
+    return () => { alive = false; window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onVis); clearTimeout(timer); };
   }, [roomId, refresh]);
 
   const gitOp = useCallback(async (op: string, body?: unknown) => {
@@ -1334,12 +1393,14 @@ export function App() {
   const isMac = IS_MAC, MOD = MOD_KEY, MODSHIFT = MOD_SHIFT, KDEL = MOD_DEL;
   const shortcutHint = `${MOD}B`;
 
-  async function refresh() {
-    const [projectData, metaData] = await Promise.all([
-      api<{ projects: Project[]; rooms: Room[] }>('/api/projects'),
-      api<Meta>('/api/meta'),
-    ]);
-    setProjects(projectData.projects); setRooms(projectData.rooms); setMeta(metaData);
+  // withMeta=false skips the near-static /api/meta fetch — the 5s poller only needs live
+  // projects/rooms, and meta (version/host/port/startedAt) is process-lifetime constant.
+  // Mount and post-mutation refreshes pass true. Uptime ticks via render-time derivation
+  // from meta.startedAt (see the status bar), so it stays smooth with no extra polling.
+  async function refresh(withMeta = true) {
+    const projectData = await api<{ projects: Project[]; rooms: Room[] }>('/api/projects');
+    if (withMeta) api<Meta>('/api/meta').then(setMeta).catch(() => undefined);
+    setProjects(projectData.projects); setRooms(projectData.rooms);
     // Reconcile the terminal cache against the live rooms: dispose any resource whose
     // room is gone (covers deletes from another window and any path that didn't tidy up
     // explicitly), so a recreated same-id room never reattaches a dead terminal.
@@ -1373,26 +1434,46 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
+  // Self-scheduling so a slow /api/projects (per-room git) can't stack; paused while the
+  // window is hidden; refetches on becoming visible. meta is skipped (refresh(false)).
   useEffect(() => {
-    const timer = setInterval(() => refresh().catch(() => undefined), 5000);
-    return () => clearInterval(timer);
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      if (!document.hidden) { try { await refresh(false); } catch { /* swallow; retry next tick */ } }
+      if (alive) timer = setTimeout(tick, 5000);
+    };
+    const onVis = () => { if (!document.hidden) refresh(false).catch(() => undefined); };
+    document.addEventListener('visibilitychange', onVis);
+    timer = setTimeout(tick, 5000);
+    return () => { alive = false; clearTimeout(timer); document.removeEventListener('visibilitychange', onVis); };
   }, [selectedProjectId, selectedRoomId]);
 
   // Poll per-room agent activity for the sidebar attention indicator, and keep the
   // focused room acknowledged so it never flags attention while you're watching it.
   useEffect(() => {
     let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    let running = false; // re-entrancy guard so a visibility refetch can't fork a 2nd chain
     const poll = async () => {
+      running = true;
       try {
-        const data = await api<{ now: number; rooms: Record<string, RoomActivity> }>('/api/activity');
-        if (!alive) return;
-        if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now();
-        setActivity(data.rooms);
+        if (!document.hidden) {
+          const data = await api<{ now: number; rooms: Record<string, RoomActivity> }>('/api/activity');
+          if (!alive) return;
+          if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now();
+          setActivity(data.rooms);
+        }
       } catch { /* host may be momentarily unreachable */ }
+      finally { running = false; if (alive) timer = setTimeout(poll, 1200); }
     };
+    // Pause the pty-host round-trip while hidden; resume at once on becoming visible. Only
+    // restart the chain when one isn't mid-flight (an in-flight poll reschedules itself), so
+    // a flurry of visibility events can never spawn a duplicate chain.
+    const onVis = () => { if (!document.hidden && !running) { clearTimeout(timer); poll(); } };
     poll();
-    const timer = setInterval(poll, 1200);
-    return () => { alive = false; clearInterval(timer); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { alive = false; clearTimeout(timer); document.removeEventListener('visibilitychange', onVis); };
   }, [selectedRoomId]);
 
   useEffect(() => { if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now(); }, [selectedRoomId]);
@@ -1402,17 +1483,27 @@ export function App() {
   // the last fetch; push/conflict are always live from local state.
   useEffect(() => {
     let alive = true;
-    const poll = async () => {
+    let timer: ReturnType<typeof setTimeout>;
+    // Standalone one-off fetch (used by the timer chain AND the devrooms:git event). Keeping
+    // it separate from scheduling means a git-op nudge never spawns a second timer chain.
+    const fetchSummary = async () => {
       try {
         const data = await api<{ summary: GitSummaries }>('/api/git/summary');
         if (alive) setGitSummary(data.summary ?? {});
       } catch { /* host may be momentarily unreachable */ }
     };
-    poll();
-    const timer = setInterval(poll, 5000);
+    let running = false; // re-entrancy guard so a visibility refetch can't fork a 2nd chain
+    const tick = async () => {
+      running = true;
+      try { if (!document.hidden) await fetchSummary(); }
+      finally { running = false; if (alive) timer = setTimeout(tick, 5000); }
+    };
+    const onVis = () => { if (!document.hidden && !running) { clearTimeout(timer); tick(); } };
+    tick();
     // A git op in the panel fires this so the sidebar updates at once, not in ≤5s.
-    window.addEventListener('devrooms:git', poll);
-    return () => { alive = false; clearInterval(timer); window.removeEventListener('devrooms:git', poll); };
+    window.addEventListener('devrooms:git', fetchSummary);
+    document.addEventListener('visibilitychange', onVis);
+    return () => { alive = false; clearTimeout(timer); window.removeEventListener('devrooms:git', fetchSummary); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
   async function pickProjectFolder() {
@@ -1714,7 +1805,7 @@ export function App() {
         <span className="spacer" />
         <button className="seg theme-seg" onClick={() => setPaletteOpen(true)} title="change theme (⌘p)"><span className="theme-chip" style={{ background: activeTheme.ui.cyan }} />{activeTheme.name.toLowerCase()}</button>
         {meta && <span className="seg">{meta.bindHost}:{meta.port}</span>}
-        {meta && <span className="seg">up {formatUptime(meta.uptimeSeconds)}</span>}
+        {meta && <span className="seg">up {formatUptime(Math.max(0, Math.round((Date.now() - new Date(meta.startedAt).getTime()) / 1000)))}</span>}
       </div>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />

@@ -196,25 +196,56 @@ async function recoverLostProcesses(state: State) {
   return state;
 }
 
-async function ensureState(): Promise<State> {
+// In-memory authoritative state. The daemon is the SOLE writer of STATE_PATH (single
+// process — no cluster/fork; the pty-host never touches it; every renderer window talks
+// to this one daemon), so we read + normalize + reconcile lost PTYs + ensure the launch
+// project ONCE at startup and keep the parsed object in memory. getState() then returns
+// that object directly — no disk read, no JSON.parse, no per-request pty-host round-trip
+// and no git spawns, all of which the four client pollers used to pay on every tick.
+// saveState() keeps the cache authoritative after each mutation (and, because all callers
+// now share one object, a concurrent read-modify-write can no longer last-writer clobber
+// a divergent disk copy).
+let cachedState: State | null = null;
+
+async function loadStateFromDisk(): Promise<State> {
   await fs.mkdir(DEVROOMS_HOME, { recursive: true });
   await fs.mkdir(ROOMS_ROOT, { recursive: true });
   let state: State;
   try {
     const raw = await fs.readFile(STATE_PATH, 'utf8');
-    state = await recoverLostProcesses(normalizeState(JSON.parse(raw)));
+    state = normalizeState(JSON.parse(raw));
   } catch {
+    // ONLY a missing or genuinely unparseable file lands here. A present-but-unparseable file
+    // would otherwise be silently overwritten with empty state (wiping every project/room), so
+    // preserve it for recovery before starting fresh. (A missing file just no-ops the rename.)
+    await fs.rename(STATE_PATH, `${STATE_PATH}.corrupt-${Date.now()}`).catch(() => undefined);
     state = emptyState();
-    await saveState(state);
   }
-  return ensureLaunchProject(state);
+  // recoverLostProcesses (a pty-host probe) and ensureLaunchProject (two git spawns) run here
+  // exactly once at boot, not per request — and OUTSIDE the try, so a transient/misconfigured
+  // launch path (DEVROOMS_PROJECT_PATH not yet a repo) propagates as a clean startup error
+  // without renaming away a perfectly valid state file. ensureLaunchProject persists via its
+  // own saveState; /api/rooms/:id/processes still reconciles exited/lost live on every fetch.
+  return ensureLaunchProject(await recoverLostProcesses(state));
+}
+
+async function ensureState(): Promise<State> {
+  if (!cachedState) cachedState = await loadStateFromDisk();
+  return cachedState;
 }
 
 async function saveState(state: State) {
+  cachedState = state; // keep the in-memory copy authoritative after every mutation
   await fs.mkdir(DEVROOMS_HOME, { recursive: true });
-  const tmp = `${STATE_PATH}.tmp`;
-  await fs.writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`);
-  await fs.rename(tmp, STATE_PATH);
+  // Unique tmp name so two concurrent writers never share (and corrupt) one tmp file —
+  // a half-written tmp surviving the rename could poison the next parse. Best-effort cleanup.
+  const tmp = `${STATE_PATH}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`);
+    await fs.rename(tmp, STATE_PATH);
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+  }
 }
 
 async function getState() {
@@ -444,12 +475,39 @@ async function hasConflictMarkers(absPath: string): Promise<boolean> {
   }
 }
 
+// The branch set only changes on checkout / fetch / branch create-delete — all of which
+// rewrite one of these .git paths. Fingerprinting their mtimes lets the 4s status poller
+// skip the `for-each-ref` spawn when refs are unchanged (the common case). origin/* is
+// nested (loose fetch-created refs land under refs/remotes/origin/<name> without bumping
+// the parent), so stat that dir directly; FETCH_HEAD (rewritten on every fetch) is a
+// cheap belt-and-suspenders. Sort order can lag if a terminal commit advances a branch
+// without changing the name set — acceptable for a picker.
+const branchCache = new Map<string, { fp: string; data: { name: string; committedAt: number }[] }>();
+
+async function branchFingerprint(room: Room): Promise<string> {
+  const g = path.join(room.path, '.git');
+  const targets = [
+    path.join(g, 'HEAD'),
+    path.join(g, 'packed-refs'),
+    path.join(g, 'FETCH_HEAD'),
+    path.join(g, 'refs', 'heads'),
+    path.join(g, 'refs', 'remotes', 'origin'),
+  ];
+  const parts = await Promise.all(targets.map(async (p) => {
+    try { return String((await fs.stat(p)).mtimeMs); } catch { return '-'; }
+  }));
+  return parts.join('|');
+}
+
 async function listBranches(room: Room): Promise<{ name: string; committedAt: number }[]> {
   // One entry per branch with its last-commit time (unix), most-recent first, so the
   // picker floats active branches to the top and sinks abandoned ones. Includes
   // remote-tracking origin/* (a fresh clone has only those; checking one out makes
   // git auto-create a local tracking branch — DWIM) collapsed to short names. Skip
   // origin/HEAD and other remotes (checking those out would detach HEAD).
+  const fp = await branchFingerprint(room);
+  const hit = branchCache.get(room.path);
+  if (hit && hit.fp === fp) return hit.data;
   const result = await runGit(room, ['for-each-ref', '--format=%(committerdate:unix)%09%(refname)', 'refs/heads/', 'refs/remotes/origin/']);
   const byName = new Map<string, number>();
   for (const line of result.stdout.split('\n')) {
@@ -466,12 +524,30 @@ async function listBranches(room: Room): Promise<{ name: string; committedAt: nu
     const prev = byName.get(name);
     if (prev === undefined || when > prev) byName.set(name, when);
   }
-  return [...byName].map(([name, committedAt]) => ({ name, committedAt })).sort((a, b) => b.committedAt - a.committedAt);
+  const data = [...byName].map(([name, committedAt]) => ({ name, committedAt })).sort((a, b) => b.committedAt - a.committedAt);
+  branchCache.set(room.path, { fp, data });
+  return data;
 }
 
 async function currentBranch(room: Room) {
   const result = await runGit(room, ['rev-parse', '--abbrev-ref', 'HEAD']);
   return result.stdout.trim();
+}
+
+// Fast branch read for the projects poller (per idle room, every ~5s). HEAD is exactly
+// the file `git switch`/`checkout` rewrites, so a plain read reflects the live branch with
+// no process spawn. Falls back to the git spawn for anything non-standard: `.git` is a FILE
+// (linked worktree/submodule with HEAD elsewhere) → readFile ENOTDIRs → catch → spawn; a
+// detached HEAD holds a sha → returns 'HEAD', identical to `git rev-parse --abbrev-ref HEAD`.
+async function currentBranchFast(room: Room): Promise<string> {
+  let raw: string;
+  try {
+    raw = (await fs.readFile(path.join(room.path, '.git', 'HEAD'), 'utf8')).trim();
+  } catch {
+    return currentBranch(room);
+  }
+  if (raw.startsWith('ref: refs/heads/')) return raw.slice('ref: refs/heads/'.length);
+  return 'HEAD'; // detached HEAD — matches `git rev-parse --abbrev-ref HEAD`
 }
 
 // Resolve a picked branch name to a ref git can merge. The branch picker collapses
@@ -830,6 +906,7 @@ async function deleteRoom(roomId: string, body: unknown) {
     if (record.roomId === roomId) delete state.processes[id];
   }
   delete state.rooms[roomId];
+  gitSnapshotCache.delete(roomId); // drop the per-room git cache entry so it can't leak
   await saveState(state);
   if (deleteFiles) {
     await assertPathInside(ROOMS_ROOT, room.path);
@@ -1164,27 +1241,53 @@ async function deriveRoomLabel(room: Room): Promise<string | undefined> {
 // actually has checked out, and derive the label from that too.
 async function roomViews(rooms: Room[]) {
   return Promise.all(rooms.map(async (room) => {
-    const live = room.status === 'idle' ? await currentBranch(room).catch(() => undefined) : undefined;
+    const live = room.status === 'idle' ? await currentBranchFast(room).catch(() => undefined) : undefined;
     const view = live && live !== room.branch ? { ...room, branch: live } : room;
     const label = await deriveRoomLabel(view).catch(() => undefined);
     return label ? { ...view, label } : view;
   }));
 }
 
+// The `git status -b` + unpushed `rev-list` pair is read by THREE overlapping pollers
+// for the same rooms within the same few seconds (the sidebar summary every 5s for every
+// idle room, and the focused room's status every 4s). Coalesce them behind a tiny TTL +
+// in-flight promise so beating timers share one pair of git spawns instead of duplicating
+// them. TTL is well under the poll intervals, so counts are at most ~1.5s staler than the
+// already-4–5s poll — invisible — and a mutating git op busts the room's entry immediately.
+const GIT_SNAPSHOT_TTL_MS = 1500;
+const gitSnapshotCache = new Map<string, { at: number; promise: Promise<{ status: RunResult; unpushed: number }> }>();
+
+function gitSnapshot(room: Room): Promise<{ status: RunResult; unpushed: number }> {
+  const hit = gitSnapshotCache.get(room.id);
+  if (hit && Date.now() - hit.at < GIT_SNAPSHOT_TTL_MS) return hit.promise;
+  const promise = (async () => {
+    const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path, { timeoutMs: 5000 });
+    let unpushed = 0;
+    if (status.exitCode === 0) {
+      const rl = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path, { timeoutMs: 5000 })
+        .catch(() => ({ exitCode: 0, stdout: '', stderr: '' } as RunResult));
+      unpushed = Number((rl.stdout ?? '').trim()) || 0;
+    }
+    return { status, unpushed };
+  })();
+  // A transient failure (timeout 504, wedged git) must not be pinned for the whole TTL.
+  promise.catch(() => gitSnapshotCache.delete(room.id));
+  gitSnapshotCache.set(room.id, { at: Date.now(), promise });
+  return promise;
+}
+
 // Lightweight per-room git signal for the sidebar: commits to pull (behind, vs
 // the last-fetched origin ref), commits to push (local commits no origin ref
 // holds — correct even without an upstream), and whether a merge left unmerged
-// paths. Two cheap reads per room; any failure (not a repo, wedged, timeout)
+// paths. Shares the coalesced snapshot; any failure (not a repo, wedged, timeout)
 // yields null so that room just shows no icons — the poller must never 500.
 async function gitRoomSignal(room: Room): Promise<{ behind: number; unpushed: number; dirty: number; conflict: boolean } | null> {
-  const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path, { timeoutMs: 5000 });
-  if (status.exitCode !== 0) return null;
-  const parsed = parseStatus(status.stdout);
-  const unpushed = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path, { timeoutMs: 5000 }).catch(() => ({ stdout: '' }));
-  const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
+  const snap = await gitSnapshot(room).catch(() => null);
+  if (!snap || snap.status.exitCode !== 0) return null;
+  const parsed = parseStatus(snap.status.stdout);
   // dirty = every uncommitted entry (modified, staged, untracked, unmerged) — "has
   // work in progress", the count the changes tab would show.
-  return { behind: parsed.behind, unpushed: unpushedCount, dirty: parsed.dirtyCount, conflict: parsed.files.some((file) => file.unmerged) };
+  return { behind: parsed.behind, unpushed: snap.unpushed, dirty: parsed.dirtyCount, conflict: parsed.files.some((file) => file.unmerged) };
 }
 
 function metaSummary(state: State) {
@@ -1474,19 +1577,21 @@ async function main() {
     try {
       const state = await getState();
       const room = getRoom(state, req.params.roomId);
-      const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path);
-      if (status.exitCode !== 0) {
+      // Shared with the sidebar summary poller (gitSnapshot): one `git status -b` +
+      // unpushed rev-list pair serves both timers. A rejected snapshot (timeout/wedged)
+      // degrades to the same graceful empty status as a non-zero exit.
+      const snap = await gitSnapshot(room).catch(() => null);
+      if (!snap || snap.status.exitCode !== 0) {
         // Git is wedged (not a repo, locked index, half-applied state, …). Degrade
         // gracefully so the panel keeps rendering and recovery stays reachable —
         // the poller must never 500 and take the whole git UI down with it.
-        res.json({ status: EMPTY_GIT_STATUS, branches: [], head: '', gitError: (status.stderr || status.stdout || 'git status failed').trim() });
+        const s = snap?.status;
+        res.json({ status: EMPTY_GIT_STATUS, branches: [], head: '', gitError: ((s?.stderr || s?.stdout) ?? 'git status failed').trim() });
         return;
       }
+      const status = snap.status;
+      const unpushedCount = snap.unpushed;
       const head = await run('git', ['rev-parse', '--short', 'HEAD'], room.path).catch(() => ({ stdout: '' }));
-      // Commits on HEAD not reachable from any origin ref = unpushed. Works even
-      // when the branch has no tracking upstream (where status's ahead count is 0).
-      const unpushed = await run('git', ['rev-list', '--count', 'HEAD', '--not', '--remotes=origin'], room.path).catch(() => ({ stdout: '' }));
-      const unpushedCount = Number((unpushed?.stdout ?? '').trim()) || 0;
       // A conflicted `pull` leaves MERGE_HEAD behind: the merge is in progress and
       // must be resolved+committed (or aborted) before push/pull can proceed.
       const merging = (await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode === 0;
@@ -1677,6 +1782,12 @@ async function main() {
       // it as 409 so the client treats it as a handled result and the panel stays alive.
       if (error instanceof HttpError && error.status === 500) apiError(new HttpError(409, error.message), res);
       else apiError(error, res);
+    } finally {
+      // Bust the coalesced snapshot whether the op SUCCEEDED or FAILED — a conflicting
+      // pull/merge throws but absolutely changed on-disk state (MERGE_HEAD, conflict markers),
+      // so the client's immediate post-op refresh must read fresh, not up-to-1.5s-stale. The
+      // pre-mutation throws (unknown op / bad args) bust a still-valid entry, which is harmless.
+      gitSnapshotCache.delete(req.params.roomId);
     }
   });
 
@@ -1806,8 +1917,19 @@ async function main() {
   const staticDir = path.join(__dirname, 'client');
   try {
     await fs.access(staticDir);
-    app.use(express.static(staticDir));
-    app.get('*splat', (_req, res) => res.sendFile(path.join(staticDir, 'index.html')));
+    // Vite emits content-hashed files under assets/ — those can be cached forever
+    // (immutable). index.html lives at the root and is the SPA shell, so it stays
+    // no-cache or a rebuild wouldn't be picked up. Scoped to the assets/ dir so a
+    // long-named unhashed public asset is never wrongly frozen.
+    app.use(express.static(staticDir, {
+      setHeaders: (res, fp) => {
+        res.setHeader('Cache-Control', /[/\\]assets[/\\]/.test(fp) ? 'public, max-age=31536000, immutable' : 'no-cache');
+      },
+    }));
+    app.get('*splat', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.join(staticDir, 'index.html'));
+    });
   } catch {
     app.get('/', (_req, res) => res.type('text/plain').send('devrooms daemon running; build client with pnpm build'));
   }

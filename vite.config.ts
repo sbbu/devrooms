@@ -26,6 +26,18 @@ export default defineConfig({
   build: {
     outDir: '../../dist/client',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Split stable vendors into their own chunks so an app-code edit doesn't invalidate
+        // react/xterm in the browser cache (paired with the immutable headers the daemon now
+        // sends for assets/), and so chunks can fetch in parallel. highlight.js is
+        // intentionally NOT listed — it is a lazy dynamic import with its own chunk.
+        manualChunks: {
+          react: ['react', 'react-dom', 'react/jsx-runtime'],
+          xterm: ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-webgl'],
+        },
+      },
+    },
   },
   server: {
     port: 5177,

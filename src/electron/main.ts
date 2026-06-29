@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, screen } from 'electron';
 import path from 'node:path';
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,11 +44,32 @@ async function isHealthy() {
 }
 
 async function waitForDaemon() {
-  for (let i = 0; i < 100; i++) {
+  // Probe fast at first (the daemon usually binds within a few hundred ms, and a tight
+  // early interval shaves the post-ready wait from ~50ms avg to ~12ms) then widen to 100ms,
+  // keeping the same ~10s overall budget. Pre-listen probes fail-fast with ECONNREFUSED.
+  const deadline = Date.now() + 10_000;
+  let attempt = 0;
+  while (Date.now() < deadline) {
     if (await isHealthy()) return;
-    await sleep(100);
+    await sleep(attempt < 40 ? 25 : 100);
+    attempt++;
   }
   throw new Error(`devrooms daemon did not become healthy at ${serverUrl}`);
+}
+
+// Kill whatever holds a TCP port, without blocking the main-process event loop the way
+// spawnSync(lsof) did (it froze IPC/window-controls for up to 3s on every launch). Still
+// awaited by the caller so the port is free before the daemon binds; the child just runs
+// async with a hard 3s cap and a fast resolve if `sh`/`lsof` is missing.
+function freePtyHostPort(p: number): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+    const child = spawn('sh', ['-c', `lsof -ti tcp:${p} | xargs kill -9`], { stdio: 'ignore' });
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } finish(); }, 3000);
+    child.on('exit', finish);
+    child.on('error', finish); // missing sh/lsof — resolve now instead of waiting out the 3s
+  });
 }
 
 async function ensureDaemon() {
@@ -59,7 +80,7 @@ async function ensureDaemon() {
   // daemon spawns a clean one. Reusing a persisted host across the renderer reconnect
   // comes up with stale terminal state that breaks input/paste; a fresh host avoids it.
   if (process.platform !== 'win32') {
-    try { spawnSync('sh', ['-c', `lsof -ti tcp:${port + 1} | xargs kill -9`], { stdio: 'ignore', timeout: 3000 }); } catch { /* best effort */ }
+    await freePtyHostPort(port + 1);
   }
 
   const serverEntry = path.resolve(__dirname, '../server.js');
@@ -77,6 +98,16 @@ async function ensureDaemon() {
 }
 
 async function createWindow() {
+  // Start the daemon (cold-start long pole: lsof + node spawn + poll-to-healthy) BEFORE the
+  // window/status-page work so its boot overlaps the status-page navigation. Probe health once
+  // up front: when the daemon is already up (warm relaunch / external server) we skip the
+  // status-page interstitial entirely and go straight to the app. The synchronous .catch keeps
+  // an early rejection (daemon timeout) from escaping as an unhandledRejection before we await
+  // it inside the try/catch below, where it still routes to the failure page.
+  const healthy = await isHealthy();
+  const daemonReady = healthy ? Promise.resolve() : ensureDaemon();
+  daemonReady.catch(() => {});
+
   // Fill the work area of whichever display devrooms launches on (responsive to
   // the monitor) rather than a fixed size that leaves dead space on larger
   // screens. Still a normal window — freely resizable down to the min.
@@ -103,9 +134,9 @@ async function createWindow() {
     void shell.openExternal(url);
     return { action: 'deny' };
   });
-  await loadStatusPage('Starting devrooms', `<p>Starting local daemon at <code>${escapeHtml(serverUrl)}</code>…</p>`);
   try {
-    await ensureDaemon();
+    if (!healthy) await loadStatusPage('Starting devrooms', `<p>Starting local daemon at <code>${escapeHtml(serverUrl)}</code>…</p>`);
+    await daemonReady;
     await mainWindow.loadURL(serverUrl);
   } catch (error) {
     const message = error instanceof Error ? error.stack ?? error.message : String(error);

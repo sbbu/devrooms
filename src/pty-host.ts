@@ -159,8 +159,23 @@ const wss = new WebSocketServer({ noServer: true });
 
 function wire(ws: WebSocket, session: Session, replay: string) {
   if (replay) ws.send(JSON.stringify({ type: 'output', data: replay }));
+  // Coalesce every PTY chunk that arrives in the same event-loop tick into one WS frame.
+  // A TUI redraw / chatty build emits a burst of small chunks; this collapses that burst's
+  // O(chunks) JSON.stringify + frames + downstream JSON.parse to O(bursts). setImmediate
+  // (not a ms timer) flushes on the very next tick, so interactive keystroke echo latency
+  // is unchanged. Activity-scan + log-replay run on a SEPARATE pty.onData listener, so they
+  // are unaffected by this batching.
+  let pending = '';
+  let scheduled = false;
+  const flush = () => {
+    scheduled = false;
+    if (!pending) return;
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'output', data: pending }));
+    pending = '';
+  };
   const disposable = session.pty.onData((data) => {
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'output', data }));
+    pending += data;
+    if (!scheduled) { scheduled = true; setImmediate(flush); }
   });
   ws.on('message', (raw) => {
     try {
@@ -175,7 +190,7 @@ function wire(ws: WebSocket, session: Session, replay: string) {
       /* ignore malformed frames */
     }
   });
-  ws.on('close', () => disposable.dispose());
+  ws.on('close', () => { disposable.dispose(); pending = ''; });
 }
 
 server.on('upgrade', (req, socket, head) => {
