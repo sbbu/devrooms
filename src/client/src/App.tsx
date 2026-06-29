@@ -460,6 +460,10 @@ async function connectTerminal(resource: TerminalResource, endpoint: string, sch
 
   const replay = resource.hasOutput ? '0' : '1';
   const socket = new WebSocket(wsUrl(`${endpoint}?replay=${replay}`));
+  // Output frames are raw binary (utf-8 bytes); take them as ArrayBuffer (not the default
+  // Blob, which would force an async .arrayBuffer() and add latency) and hand the bytes
+  // straight to xterm's UTF-8 decoder. Input/resize we send are still JSON text.
+  socket.binaryType = 'arraybuffer';
   resource.endpoint = endpoint;
   resource.socket = socket;
   // Fresh socket ⇒ the PTY on the other end knows nothing about our size yet, so force the
@@ -468,10 +472,9 @@ async function connectTerminal(resource: TerminalResource, endpoint: string, sch
   resource.lastSentRows = undefined;
   socket.addEventListener('open', () => { resource.retries = 0; scheduleFit(); });
   socket.addEventListener('message', (event) => {
-    const msg = JSON.parse(event.data as string) as { type?: string; data?: string };
-    if (msg.type === 'output' && typeof msg.data === 'string') {
+    if (event.data instanceof ArrayBuffer) {
       resource.hasOutput = true;
-      resource.term.write(msg.data);
+      resource.term.write(new Uint8Array(event.data));
     }
   });
   socket.addEventListener('close', () => {

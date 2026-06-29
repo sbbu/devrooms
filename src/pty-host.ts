@@ -158,19 +158,23 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 function wire(ws: WebSocket, session: Session, replay: string) {
-  if (replay) ws.send(JSON.stringify({ type: 'output', data: replay }));
+  // Output frames are sent as raw BINARY (utf-8 bytes), not JSON-string-escaped text: it
+  // skips a JSON.stringify here + JSON.parse in the renderer, avoids ANSI-escape inflation
+  // on the wire (ESC 0x1b would JSON-escape to 6 bytes), and lets xterm ingest via its fast
+  // UTF-8 byte decoder. The daemon proxy forwards {binary} transparently; input/resize
+  // (client->server) stay JSON text, so the inbound handler below is unchanged.
+  if (replay) ws.send(Buffer.from(replay, 'utf8'), { binary: true });
   // Coalesce every PTY chunk that arrives in the same event-loop tick into one WS frame.
   // A TUI redraw / chatty build emits a burst of small chunks; this collapses that burst's
-  // O(chunks) JSON.stringify + frames + downstream JSON.parse to O(bursts). setImmediate
-  // (not a ms timer) flushes on the very next tick, so interactive keystroke echo latency
-  // is unchanged. Activity-scan + log-replay run on a SEPARATE pty.onData listener, so they
-  // are unaffected by this batching.
+  // O(chunks) encodes + frames + downstream writes to O(bursts). setImmediate (not a ms
+  // timer) flushes on the very next tick, so interactive keystroke echo latency is unchanged.
+  // Activity-scan + log-replay run on a SEPARATE pty.onData listener, unaffected by batching.
   let pending = '';
   let scheduled = false;
   const flush = () => {
     scheduled = false;
     if (!pending) return;
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'output', data: pending }));
+    if (ws.readyState === ws.OPEN) ws.send(Buffer.from(pending, 'utf8'), { binary: true });
     pending = '';
   };
   const disposable = session.pty.onData((data) => {
@@ -213,7 +217,7 @@ server.on('upgrade', (req, socket, head) => {
     const session = sessions.get(key);
     const wantsReplay = url.searchParams.get('replay') !== '0';
     if (!session) {
-      ws.send(JSON.stringify({ type: 'output', data: '\r\n[devrooms: no live session — reopen it]\r\n' }));
+      ws.send(Buffer.from('\r\n[devrooms: no live session — reopen it]\r\n', 'utf8'), { binary: true });
       ws.close();
       return;
     }

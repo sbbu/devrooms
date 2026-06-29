@@ -1593,8 +1593,20 @@ async function main() {
       const unpushedCount = snap.unpushed;
       const head = await run('git', ['rev-parse', '--short', 'HEAD'], room.path).catch(() => ({ stdout: '' }));
       // A conflicted `pull` leaves MERGE_HEAD behind: the merge is in progress and
-      // must be resolved+committed (or aborted) before push/pull can proceed.
-      const merging = (await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode === 0;
+      // must be resolved+committed (or aborted) before push/pull can proceed. In a normal
+      // clone .git is a directory and MERGE_HEAD is a plain loose file whose mere existence
+      // is exactly what `rev-parse --verify MERGE_HEAD` checks — so a stat avoids the per-tick
+      // git spawn. Linked worktrees keep .git as a FILE (gitdir elsewhere), so fall back to
+      // the spawn there; any stat error also falls back.
+      let merging: boolean;
+      try {
+        const gitDir = path.join(room.path, '.git');
+        merging = (await fs.stat(gitDir)).isDirectory()
+          ? await fs.stat(path.join(gitDir, 'MERGE_HEAD')).then(() => true, () => false)
+          : (await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode === 0;
+      } catch {
+        merging = (await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode === 0;
+      }
       const parsed = parseStatus(status.stdout);
       // Mark a file as still-conflicted only while conflict markers remain in it, so
       // "commit merge" lights up once the user has resolved them (even before staging).
@@ -1971,9 +1983,11 @@ async function main() {
           upstreamPath = `/ws/processes/${processTerminal![1]}`;
         }
       } catch (error) {
-        // Finish the handshake only to surface the error to the client, then close.
+        // Finish the handshake only to surface the error to the client, then close. Sent as
+        // a BINARY output frame to match the pty-host wire protocol — the renderer now ingests
+        // only binary terminal frames, so a JSON text frame here would be silently dropped.
         wss.handleUpgrade(req, socket, head, (ws) => {
-          try { ws.send(JSON.stringify({ type: 'output', data: `\r\n[devrooms: ${String(error)}]\r\n` })); } catch { /* noop */ }
+          try { ws.send(Buffer.from(`\r\n[devrooms: ${String(error)}]\r\n`, 'utf8'), { binary: true }); } catch { /* noop */ }
           ws.close();
         });
         return;

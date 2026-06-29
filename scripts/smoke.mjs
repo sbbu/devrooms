@@ -74,9 +74,9 @@ async function websocketProbe(url, onOpen, expected) {
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`websocket timed out; output=${out}`)), 6000);
     ws.on('open', () => onOpen?.(ws));
-    ws.on('message', (raw) => {
-      const msg = JSON.parse(raw.toString());
-      if (msg.type === 'output') out += msg.data;
+    // Terminal output frames are binary (raw utf-8 bytes); input/resize we send stay JSON text.
+    ws.on('message', (raw, isBinary) => {
+      if (isBinary) out += raw.toString('utf8');
       if (out.includes(expected)) {
         clearTimeout(timer);
         resolve();
