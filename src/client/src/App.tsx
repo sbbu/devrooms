@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 import { CommandPalette, score, type Command } from './CommandPalette';
-import { useConfirm } from './Confirm';
+import { useConfirm, type ConfirmOptions } from './Confirm';
 import { getActiveTheme, getConfig, resolveTheme, subscribe, type Mode } from './themes';
 
 // Keyboard-shortcut modifier for hints + handlers: ⌘ on macOS (never reaches the
@@ -1530,7 +1530,33 @@ export function App() {
   async function deleteSelectedRoom() {
     if (!selectedRoom) return;
     const deleteFiles = selectedRoom.kind !== 'main';
-    const really = await confirm({
+    // Deleting a clone room removes its whole working tree — anything not BOTH committed and
+    // pushed is gone for good (this is how a still-needed script gets lost). Re-check git state
+    // live (the sidebar poll can be paused while hidden or simply stale) and, if there's unsaved
+    // work, escalate from the routine confirm to a specific, loud warning naming what dies.
+    let danger: ConfirmOptions | null = null;
+    if (deleteFiles) {
+      const fresh = await git.refresh();
+      const uncommitted = fresh?.status.files.length ?? 0;
+      const unpushed = fresh?.status.unpushedCount ?? 0;
+      // Couldn't read git state → fail safe and warn rather than quietly delete.
+      const unverifiable = !fresh || !!fresh.gitError;
+      if (uncommitted > 0 || unpushed > 0 || unverifiable) {
+        const parts = [
+          uncommitted > 0 ? `${uncommitted} uncommitted change${uncommitted === 1 ? '' : 's'}` : '',
+          unpushed > 0 ? `${unpushed} unpushed commit${unpushed === 1 ? '' : 's'}` : '',
+        ].filter(Boolean);
+        const what = parts.length ? parts.join(' and ') : 'work that could not be verified as saved';
+        danger = {
+          title: `${selectedRoom.name} has unsaved work — delete it anyway?`,
+          detail: `${what} in this room will be permanently deleted along with its files. This cannot be undone. Commit and push first if you want to keep it.`,
+          confirmLabel: 'delete anyway',
+          cancelLabel: 'keep room',
+          danger: true,
+        };
+      }
+    }
+    const really = await confirm(danger ?? {
       title: `Remove ${selectedRoom.name} from devrooms?`,
       detail: deleteFiles ? "Its cloned files will be deleted too — this can't be undone." : 'The main repo files will be left untouched.',
       confirmLabel: deleteFiles ? 'remove & delete files' : 'remove room',
