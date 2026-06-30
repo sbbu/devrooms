@@ -34,6 +34,7 @@ type Session = {
   agentState?: AgentState;     // last explicit state from an agent hook (private OSC)
   agentStateMs: number;        // wall-clock of that explicit state
   scanCarry: string;           // tail of the last chunk, so markers split across chunks still match
+  modes: Map<number, boolean>; // sticky DEC private-mode state (alt-screen, mouse, …) for replay
 };
 
 // key: "room:<roomId>" | "proc:<processId>"
@@ -52,6 +53,17 @@ function appendLog(log: string[], data: string) {
 const STATE_RE = /\x1b\]9279;(working|needs-input|done)(?:\x07|\x1b\\)/g;
 const NOTIFY_RE = /\x1b\]9;[^\x07\x1b]|\x1b\]777;/;
 
+// DEC private mode set/reset: `CSI ? Pm ; Pm … h` (set) / `… l` (reset). These are
+// STICKY — once a TUI enters the alt-screen (1049) or turns on mouse reporting, the mode
+// holds until explicitly toggled back. We track the latest state of each so a reconnecting
+// client can have it restored (see buildReplay). The leading `?` keeps this to DEC private
+// modes; standard SM/RM (no `?`) are left alone. Mirrors STATE_RE's split-chunk handling.
+const DEC_MODE_RE = /\x1b\[\?([0-9;]+)([hl])/g;
+// DEC private modes whose hardware default is SET. For every other mode we assume the
+// default is RESET, so the replay prelude only needs to emit a mode we saw turned on.
+// 7 = DECAWM (autowrap), 25 = DECTCEM (cursor visible).
+const DEFAULT_ON_MODES = new Set([7, 25]);
+
 function scanActivity(session: Session, data: string) {
   session.lastOutputMs = Date.now();
   const buf = session.scanCarry + data;
@@ -61,7 +73,33 @@ function scanActivity(session: Session, data: string) {
   while ((match = STATE_RE.exec(buf))) lastState = match[1] as AgentState;
   if (lastState) { session.agentState = lastState; session.agentStateMs = Date.now(); }
   if (NOTIFY_RE.test(buf)) session.attentionMs = Date.now();
+  // Update sticky-mode state. Re-scanning the carry overlap re-applies the same toggle,
+  // which is idempotent on a mode's final state, so split escapes can't corrupt it.
+  DEC_MODE_RE.lastIndex = 0;
+  while ((match = DEC_MODE_RE.exec(buf))) {
+    const on = match[2] === 'h';
+    for (const part of match[1].split(';')) {
+      const n = Number(part);
+      if (n) session.modes.set(n, on);
+    }
+  }
   session.scanCarry = data.slice(-48);
+}
+
+// Reconstruct the escape sequences that restore the session's current sticky-mode state.
+// A reconnecting/late client gets only the last ~200KB of output, long after the one-shot
+// `\x1b[?1049h` that put a TUI on the alt-screen scrolled out of the buffer (and out of the
+// 5000-chunk log entirely) — so without this the replay paints alt-screen redraws into the
+// NORMAL buffer, leaving the user able to mouse-scroll into stale frames while the live app
+// never receives the wheel. Emitting the prelude BEFORE the tail makes the tail repaint into
+// the correct buffer, with mouse-reporting / bracketed-paste / cursor visibility restored too.
+function modePrelude(session: Session): string {
+  let prelude = '';
+  for (const [n, on] of session.modes) {
+    if (on === DEFAULT_ON_MODES.has(n)) continue; // already at hardware default — skip
+    prelude += `\x1b[?${n}${on ? 'h' : 'l'}`;
+  }
+  return prelude;
 }
 
 function logTail(log: string[], maxChars = 4000) {
@@ -76,7 +114,7 @@ function spawnSession(key: string, args: string[], opts: { cwd: string; env: Rec
   const rows = opts.rows ?? 36;
   const shell = opts.env.SHELL || process.env.SHELL || '/bin/zsh';
   const child = pty.spawn(shell, args, { name: 'xterm-256color', cols, rows, cwd: opts.cwd, env: opts.env });
-  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows, shell: shell.split('/').pop() || shell, lastOutputMs: Date.now(), attentionMs: 0, agentStateMs: 0, scanCarry: '' };
+  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows, shell: shell.split('/').pop() || shell, lastOutputMs: Date.now(), attentionMs: 0, agentStateMs: 0, scanCarry: '', modes: new Map() };
   child.onData((data) => { appendLog(session.log, data); scanActivity(session, data); });
   child.onExit(({ exitCode }) => {
     session.status = 'exited';
@@ -221,7 +259,7 @@ server.on('upgrade', (req, socket, head) => {
       ws.close();
       return;
     }
-    wire(ws, session, wantsReplay ? logTail(session.log, 200_000) : '');
+    wire(ws, session, wantsReplay ? modePrelude(session) + logTail(session.log, 200_000) : '');
   });
 });
 
