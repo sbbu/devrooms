@@ -25,8 +25,6 @@ type Session = {
   status: 'running' | 'exited';
   exitCode?: number;
   exitedAt?: string;
-  cols: number;
-  rows: number;
   shell: string;               // basename of the spawn shell, to tell "idle shell" from "running something"
   // Activity tracking for the sidebar "needs attention vs thinking" indicator.
   lastOutputMs: number;        // wall-clock of the most recent output byte
@@ -42,7 +40,9 @@ const sessions = new Map<string, Session>();
 
 function appendLog(log: string[], data: string) {
   log.push(data);
-  if (log.length > 5000) log.splice(0, log.length - 5000);
+  // Trim in 1000-chunk batches: splicing on every push once at capacity would shift
+  // the whole array per output chunk during heavy streaming.
+  if (log.length > 6000) log.splice(0, log.length - 5000);
 }
 
 // Derive activity from the raw output stream. Agents announce state three ways:
@@ -103,7 +103,12 @@ function modePrelude(session: Session): string {
 }
 
 function logTail(log: string[], maxChars = 4000) {
-  return log.join('').slice(-maxChars);
+  // Walk chunks from the end until maxChars is covered — joining the whole buffer
+  // would build a multi-megabyte string to keep only its last few KB.
+  let chars = 0;
+  let start = log.length;
+  while (start > 0 && chars < maxChars) { start -= 1; chars += log[start].length; }
+  return log.slice(start).join('').slice(-maxChars);
 }
 
 function spawnSession(key: string, args: string[], opts: { cwd: string; env: Record<string, string>; cols?: number; rows?: number }) {
@@ -114,7 +119,7 @@ function spawnSession(key: string, args: string[], opts: { cwd: string; env: Rec
   const rows = opts.rows ?? 36;
   const shell = opts.env.SHELL || process.env.SHELL || '/bin/zsh';
   const child = pty.spawn(shell, args, { name: 'xterm-256color', cols, rows, cwd: opts.cwd, env: opts.env });
-  const session: Session = { key, pty: child, log: [], status: 'running', cols, rows, shell: shell.split('/').pop() || shell, lastOutputMs: Date.now(), attentionMs: 0, agentStateMs: 0, scanCarry: '', modes: new Map() };
+  const session: Session = { key, pty: child, log: [], status: 'running', shell: shell.split('/').pop() || shell, lastOutputMs: Date.now(), attentionMs: 0, agentStateMs: 0, scanCarry: '', modes: new Map() };
   child.onData((data) => { appendLog(session.log, data); scanActivity(session, data); });
   child.onExit(({ exitCode }) => {
     session.status = 'exited';
@@ -225,8 +230,6 @@ function wire(ws: WebSocket, session: Session, replay: string) {
       if (msg.type === 'input' && typeof msg.data === 'string' && session.status === 'running') session.pty.write(msg.data);
       if (msg.type === 'resize' && msg.cols && msg.rows && session.status === 'running') {
         session.pty.resize(msg.cols, msg.rows);
-        session.cols = msg.cols;
-        session.rows = msg.rows;
       }
     } catch {
       /* ignore malformed frames */
