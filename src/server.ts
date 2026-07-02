@@ -864,6 +864,28 @@ async function copyEnvFiles(srcRoot: string, destRoot: string): Promise<number> 
   return copied;
 }
 
+// Repo-local git config never survives `git clone` — the clone starts with a fresh
+// .git/config. Git Town keeps its whole setup there (main branch, perennials, the
+// git-town-branch.<name>.parent lineage), so without this a new room re-asks the
+// `git town` setup questions. Carry every git-town key over verbatim, and nothing
+// else — copying all local config would clobber the clone's own remote.origin.url.
+// -z framing survives values with newlines; --add preserves multi-valued keys.
+async function copyGitTownConfig(srcRoot: string, destRoot: string): Promise<number> {
+  const listed = await run('git', ['config', '--local', '-z', '--get-regexp', '^git-town'], srcRoot);
+  if (listed.exitCode !== 0) return 0; // exit 1: no git-town keys — nothing to carry
+  let copied = 0;
+  for (const entry of listed.stdout.split('\0')) {
+    if (!entry) continue;
+    const nl = entry.indexOf('\n');
+    const key = nl >= 0 ? entry.slice(0, nl) : entry;
+    const value = nl >= 0 ? entry.slice(nl + 1) : '';
+    const set = await run('git', ['config', '--local', '--add', key, value], destRoot);
+    if (set.exitCode === 0) copied += 1;
+    else console.error(`devrooms: git-town config carry failed for ${key}:`, set.stderr.trim());
+  }
+  return copied;
+}
+
 async function materializeRoom(project: Project, room: Room) {
   try {
     await fs.mkdir(path.dirname(room.path), { recursive: true });
@@ -892,10 +914,13 @@ async function materializeRoom(project: Project, room: Room) {
           .catch((error) => console.error(`devrooms: reset ${checkedOut} to origin failed`, error));
       }
     }
-    // Carry over the source repo's gitignored .env files (the clone won't have them).
+    // Carry over the source repo's gitignored .env files (the clone won't have them)
+    // and its repo-local git-town config (git clone starts a fresh .git/config).
     if (project.rootPath) {
       const copied = await copyEnvFiles(project.rootPath, room.path).catch((error) => { console.error('devrooms: .env copy failed', error); return 0; });
       if (copied) console.log(`devrooms: copied ${copied} .env file(s) into ${room.path}`);
+      const townKeys = await copyGitTownConfig(project.rootPath, room.path).catch((error) => { console.error('devrooms: git-town config carry failed', error); return 0; });
+      if (townKeys) console.log(`devrooms: carried ${townKeys} git-town config key(s) into ${room.path}`);
     }
     room.status = 'idle';
     room.updatedAt = now();
