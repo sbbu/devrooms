@@ -453,21 +453,46 @@ function unquoteGitPath(entry: string): string {
   return Buffer.from(bytes).toString('utf8');
 }
 
-// A rename/copy status entry reads `orig -> new` (either side may be quoted); return
-// the new path. When orig is quoted, scan past its escapes to the closing quote so a
-// literal " -> " inside the old name can't split the entry early. An unquoted orig
-// containing " -> " is ambiguous in porcelain v1 itself — first match is the best
-// available reading.
-function renameTargetPath(entry: string): string {
+// A rename/copy status entry reads `orig -> new` (either side may be quoted); split it.
+// When orig is quoted, scan past its escapes to the closing quote so a literal " -> "
+// inside the old name can't split the entry early. An unquoted orig containing " -> "
+// is ambiguous in porcelain v1 itself — first match is the best available reading.
+function splitRenameEntry(entry: string): { orig?: string; target: string } {
   if (entry.startsWith('"')) {
     for (let i = 1; i < entry.length; i++) {
       if (entry[i] === '\\') { i++; continue; }
-      if (entry[i] === '"') return entry.slice(i + 1).startsWith(' -> ') ? entry.slice(i + 5) : entry;
+      if (entry[i] === '"') {
+        return entry.slice(i + 1).startsWith(' -> ')
+          ? { orig: entry.slice(0, i + 1), target: entry.slice(i + 5) }
+          : { target: entry };
+      }
     }
-    return entry;
+    return { target: entry };
   }
   const sep = entry.indexOf(' -> ');
-  return sep >= 0 ? entry.slice(sep + 4) : entry;
+  return sep >= 0 ? { orig: entry.slice(0, sep), target: entry.slice(sep + 4) } : { target: entry };
+}
+
+function renameTargetPath(entry: string): string {
+  return splitRenameEntry(entry).target;
+}
+
+// Rename entries surface to the client as their TARGET path only, but git-op pathspecs
+// must also cover the rename SOURCE (the staged deletion) — otherwise commit/stage/
+// unstage handle half the rename (committing a duplicate file) and discard treats the
+// target as untracked and deletes it. Resolves targets → sources from a fresh porcelain
+// read; callers must resolve BEFORE any `git reset`, which dissolves rename entries.
+async function renameSources(room: Room, files: string[]): Promise<Map<string, string>> {
+  const wanted = new Set(files);
+  const sources = new Map<string, string>();
+  const status = await run('git', ['status', '--porcelain=v1'], room.path, { timeoutMs: 5000 });
+  if (status.exitCode !== 0) return sources;
+  for (const line of status.stdout.split('\n')) {
+    if (!line) continue;
+    const { orig, target } = splitRenameEntry(line.slice(3));
+    if (orig !== undefined && wanted.has(unquoteGitPath(target))) sources.set(unquoteGitPath(target), unquoteGitPath(orig));
+  }
+  return sources;
 }
 
 function parseStatus(raw: string) {
@@ -514,12 +539,14 @@ async function hasConflictMarkers(absPath: string): Promise<boolean> {
 }
 
 // Fingerprinting the ref state lets the 4s status poller skip the `for-each-ref` spawn
-// when branches are unchanged (the common case). Loose refs are listed by name recursively:
-// a slash-y branch lands at refs/heads/<a>/<b> and only bumps its immediate parent dir's
-// mtime, so a stat of refs/heads alone would miss it. Packed refs (git pack-refs, clones)
-// live in the packed-refs file, covered by its mtime; FETCH_HEAD (rewritten on every
-// fetch) is a cheap belt-and-suspenders. Sort order can lag if a terminal commit advances
-// a branch without changing the name set — acceptable for a picker.
+// when branches are unchanged (the common case). Loose refs are walked recursively with
+// per-file mtimes: the recursive NAMES catch nested branch create/delete (a slash-y
+// branch at refs/heads/<a>/<b> only bumps its immediate parent dir's mtime), and the
+// per-file MTIMES catch commits, which rewrite the loose ref in place — a commit must
+// refresh the picker's ages/ordering within one poll. Packed refs (git pack-refs,
+// clones) are covered by the packed-refs file mtime; FETCH_HEAD (rewritten on every
+// fetch) is a cheap belt-and-suspenders. The stats are one per loose ref — trivial
+// beside the for-each-ref spawn they save.
 const branchCache = new Map<string, { fp: string; data: { name: string; committedAt: number }[] }>();
 
 async function branchFingerprint(room: Room): Promise<string> {
@@ -527,10 +554,16 @@ async function branchFingerprint(room: Room): Promise<string> {
   const stats = [path.join(g, 'HEAD'), path.join(g, 'packed-refs'), path.join(g, 'FETCH_HEAD')].map(async (p) => {
     try { return String((await fs.stat(p)).mtimeMs); } catch { return '-'; }
   });
-  const names = [path.join(g, 'refs', 'heads'), path.join(g, 'refs', 'remotes', 'origin')].map(async (p) => {
-    try { return (await fs.readdir(p, { recursive: true })).sort().join(','); } catch { return '-'; }
+  const looseRefs = [path.join(g, 'refs', 'heads'), path.join(g, 'refs', 'remotes', 'origin')].map(async (dir) => {
+    try {
+      const names = (await fs.readdir(dir, { recursive: true })).sort();
+      const parts = await Promise.all(names.map(async (name) => {
+        try { return `${name}:${(await fs.stat(path.join(dir, String(name)))).mtimeMs}`; } catch { return String(name); }
+      }));
+      return parts.join(',');
+    } catch { return '-'; }
   });
-  return (await Promise.all([...stats, ...names])).join('|');
+  return (await Promise.all([...stats, ...looseRefs])).join('|');
 }
 
 async function listBranches(room: Room): Promise<{ name: string; committedAt: number }[]> {
@@ -740,12 +773,12 @@ async function createRoom(projectId: string, body: unknown) {
   // it would collide with the main room (e.g. "main") and isn't a chosen task label.
   const rawName = typeof input.name === 'string' ? input.name.trim() : '';
   let name = rawName || explicitBranch || nextRoomHandle(state, project.id);
-  // A name whose own slug is empty (all emoji / non-Latin) can still yield a non-empty
-  // room id (the project prefix survives), but roomPath below joins slugify(name) — and
-  // an empty leaf would collapse the path onto the project's rooms PARENT dir, which a
-  // later delete-with-files would wipe wholesale. Regenerate the whole name so id, name
-  // and path stay consistent.
-  if (!slugify(name)) name = nextRoomHandle(state, project.id);
+  // A name whose own slug is empty (all emoji / non-Latin) or dot-only ("." / "..",
+  // which slugify keeps) can still yield a non-empty room id (the project prefix
+  // survives), but roomPath below joins slugify(name) — and such a leaf collapses the
+  // path onto the project's rooms dir or its PARENT, which a later delete-with-files
+  // would wipe wholesale. Regenerate the whole name so id, name and path stay consistent.
+  if (!slugify(name).replace(/^\.+$/, '')) name = nextRoomHandle(state, project.id);
   let id = slugify(`${project.id}-${name}`);
   if (!id) throw new HttpError(400, 'room id is empty after slugification');
   // A non-typed name that collided (cloning the current branch when a same-named room
@@ -1765,11 +1798,13 @@ async function main() {
       if (op === 'stage') {
         const file = requireString(req.body?.path, 'path');
         await assertPathInside(room.path, path.join(room.path, file));
-        result = await runGit(room, ['add', '--', file]);
+        const orig = (await renameSources(room, [file])).get(file);
+        result = await runGit(room, ['add', '--', ...(orig ? [orig] : []), file]);
       } else if (op === 'unstage') {
         const file = requireString(req.body?.path, 'path');
         await assertPathInside(room.path, path.join(room.path, file));
-        result = await runGit(room, ['restore', '--staged', '--', file]);
+        const orig = (await renameSources(room, [file])).get(file);
+        result = await runGit(room, ['restore', '--staged', '--', ...(orig ? [orig] : []), file]);
       } else if (op === 'fetch') {
         result = await runGit(room, ['fetch', '--all', '--prune'], { timeoutMs: 5 * 60_000 });
       } else if (op === 'pull') {
@@ -1799,18 +1834,27 @@ async function main() {
         const paths = rawPaths.filter((p): p is string => typeof p === 'string' && p.length > 0);
         if (paths.length) {
           // Commit exactly the checked files (GitHub Desktop style): clear the
-          // index, stage only the selected paths, then commit.
+          // index, stage only the selected paths, then commit. Rename sources ride
+          // along with their targets so the staged deletion lands in the commit too.
           for (const p of paths) await assertPathInside(room.path, path.join(room.path, p));
+          const sources = await renameSources(room, paths);
           await runGit(room, ['reset', '-q']);
-          await runGit(room, ['add', '--', ...paths]);
+          await runGit(room, ['add', '--', ...new Set([...sources.values(), ...paths])]);
         }
         result = await runGit(room, ['commit', '-m', message]);
       } else if (op === 'discard') {
         // Throw away uncommitted changes to one path (destructive; client confirms).
         const file = requireString(req.body?.path, 'path');
         await assertPathInside(room.path, path.join(room.path, file));
-        const tracked = (await run('git', ['cat-file', '-e', `HEAD:${file}`], room.path)).exitCode === 0;
-        if (tracked) {
+        const orig = (await renameSources(room, [file])).get(file);
+        if (orig) {
+          // A rename target: the committed state is the SOURCE at HEAD. Restore it and
+          // remove the target — treating the target as plain-untracked would delete it
+          // without ever bringing the source back.
+          await runGit(room, ['checkout', 'HEAD', '--', orig]);
+          await run('git', ['rm', '-f', '--ignore-unmatch', '--', file], room.path);
+          result = await runGit(room, ['clean', '-fd', '--', file]);
+        } else if ((await run('git', ['cat-file', '-e', `HEAD:${file}`], room.path)).exitCode === 0) {
           // Modified/staged/deleted -> restore index + worktree to the committed version.
           result = await runGit(room, ['checkout', 'HEAD', '--', file]);
         } else {
