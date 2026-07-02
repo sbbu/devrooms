@@ -155,12 +155,18 @@ function parseDiff(text: string): DiffRow[] {
   let oldNo = 0;
   let newNo = 0;
   let curLang: string | undefined;
+  // Header lines like `---`/`+++`/`index ` only exist BETWEEN file sections. Inside a
+  // hunk the same prefixes are real content (deleting a line that starts with `--`
+  // produces `---…`), so classify them as meta only while outside a hunk.
+  let inHunk = false;
   for (const line of text.split('\n')) {
+    if (line.startsWith('diff ')) inHunk = false;
     if (line.startsWith('@@')) {
       const match = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (match) { oldNo = Number(match[1]); newNo = Number(match[2]); }
+      inHunk = true;
       rows.push({ type: 'hunk', text: line });
-    } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('+++') || line.startsWith('---') || line.startsWith('new file') || line.startsWith('deleted file') || line.startsWith('old mode') || line.startsWith('new mode') || line.startsWith('similarity') || line.startsWith('rename ') || line.startsWith('\\')) {
+    } else if (line.startsWith('\\') || (!inHunk && (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('+++') || line.startsWith('---') || line.startsWith('new file') || line.startsWith('deleted file') || line.startsWith('old mode') || line.startsWith('new mode') || line.startsWith('similarity') || line.startsWith('rename ') || line.startsWith('Binary files ')))) {
       if (line.startsWith('+++ b/')) curLang = langForPath(line.slice(6));
       else if (line.startsWith('diff --git')) { const mm = /^diff --git a\/.+ b\/(.+)$/.exec(line); if (mm) curLang = langForPath(mm[1]); }
       rows.push({ type: 'meta', text: line });
@@ -186,7 +192,8 @@ function parseDiff(text: string): DiffRow[] {
 // lines may mis-highlight an interior line — an acceptable trade-off for
 // line-based diffs. hljs escapes the text it emits, so the HTML is safe to inject.
 function highlightCode(code: string, lang?: string): ReactNode {
-  if (!code || !lang || !hljs) return code;
+  // The length cap sidesteps hljs choking on minified one-liners.
+  if (!code || code.length > 1000 || !lang || !hljs) return code;
   try {
     return <span dangerouslySetInnerHTML={{ __html: hljs.highlight(code, { language: lang, ignoreIllegals: true }).value }} />;
   } catch {
@@ -198,22 +205,33 @@ function highlightCode(code: string, lang?: string): ReactNode {
 // only re-run when the diff text/path actually changes or hljs finishes loading — never on
 // the background pollers' frequent parent re-renders. `ready` is in BOTH deps because
 // parseDiff itself calls langForPath (which returns undefined until hljs is loaded).
+// Render bounds for pathological diffs (a lockfile rewrite, a generated bundle): past
+// MAX_DIFF_ROWS the DOM itself is the problem, and past HIGHLIGHT_MAX_ROWS the per-line
+// hljs passes are — plain text still reads fine.
+const MAX_DIFF_ROWS = 5000;
+const HIGHLIGHT_MAX_ROWS = 2000;
+
 const DiffView = memo(function DiffView({ text, path }: { text: string; path?: string }) {
   const ready = useHljs();
   const rows = useMemo(() => parseDiff(text), [text, ready]);
   const fallbackLang = useMemo(() => langForPath(path), [path, ready]);
   if (!text.trim()) return <div className="empty">no textual changes</div>;
+  const visible = rows.length > MAX_DIFF_ROWS ? rows.slice(0, MAX_DIFF_ROWS) : rows;
+  const highlight = rows.length <= HIGHLIGHT_MAX_ROWS;
   return (
     <div className="diff-table">
-      {rows.map((row, i) => (
+      {visible.map((row, i) => (
         <div key={i} className={`dl ${row.type}`}>
           <span className="ln">{row.oldNo ?? ''}</span>
           <span className="ln">{row.newNo ?? ''}</span>
           {row.type === 'add' || row.type === 'del' || row.type === 'ctx'
-            ? <span className="dc"><span className="dpfx">{row.text.slice(0, 1) || ' '}</span>{highlightCode(row.text.slice(1), row.lang ?? fallbackLang)}</span>
+            ? <span className="dc"><span className="dpfx">{row.text.slice(0, 1) || ' '}</span>{highlight ? highlightCode(row.text.slice(1), row.lang ?? fallbackLang) : row.text.slice(1)}</span>
             : <span className="dc">{row.text === '' ? ' ' : row.text}</span>}
         </div>
       ))}
+      {rows.length > MAX_DIFF_ROWS && (
+        <div className="dl meta"><span className="ln" /><span className="ln" /><span className="dc">… {rows.length - MAX_DIFF_ROWS} more lines not shown</span></div>
+      )}
     </div>
   );
 });
@@ -228,6 +246,7 @@ type TerminalResource = {
   endpoint?: string;
   wantEndpoint?: string;
   wantEnsure?: string;
+  connectSeq?: number;                        // stamps each connectTerminal call; stale calls bail after their await
   socket?: WebSocket;
   input?: { dispose(): void };
   reconnectTimer?: number;
@@ -431,6 +450,7 @@ function scheduleReconnect(resource: TerminalResource, scheduleFit: () => void) 
 async function connectTerminal(resource: TerminalResource, endpoint: string, scheduleFit: () => void, isReconnect = false, ensure?: string) {
   resource.wantEndpoint = endpoint;
   resource.wantEnsure = ensure;
+  const seq = resource.connectSeq = (resource.connectSeq ?? 0) + 1;
   if (resource.reconnectTimer) { window.clearTimeout(resource.reconnectTimer); resource.reconnectTimer = undefined; }
 
   const ready = resource.socket?.readyState;
@@ -454,7 +474,10 @@ async function connectTerminal(resource: TerminalResource, endpoint: string, sch
   // and can't lazily spawn it — the client asks the daemon to ensure it first.
   if (ensure) {
     try { await fetch(ensure, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); } catch { /* host may already have it */ }
-    if (resource.wantEndpoint !== endpoint) return; // superseded by a newer connect
+    // Superseded while awaiting — by a newer connect (even to the SAME endpoint: two
+    // survivors would each open a socket and interleave duplicate output into one
+    // terminal) or by a dispose. Only the newest call may proceed.
+    if (resource.connectSeq !== seq || resource.wantEndpoint !== endpoint) return;
   }
 
   const replay = resource.hasOutput ? '0' : '1';
@@ -471,6 +494,7 @@ async function connectTerminal(resource: TerminalResource, endpoint: string, sch
   resource.lastSentRows = undefined;
   socket.addEventListener('open', () => { resource.retries = 0; scheduleFit(); });
   socket.addEventListener('message', (event) => {
+    if (resource.socket !== socket) return; // superseded — drop frames rather than interleave two streams
     if (event.data instanceof ArrayBuffer) {
       resource.hasOutput = true;
       resource.term.write(new Uint8Array(event.data));
@@ -641,14 +665,18 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
     setSelected((current) => (current && files.some((file) => file.path === current)) ? current : (files[0]?.path ?? null));
   }, [status]);
 
+  // statusRaw in the deps re-fetches when the working tree ITSELF moves (agent edits,
+  // a poll after a commit) — not just when the selection does. The functional setDiff
+  // keeps the previous object when the text is unchanged so DiffView's memo holds.
+  const statusRaw = status?.status.raw ?? '';
   useEffect(() => {
     if (!selected) { setDiff(null); return; }
     let alive = true;
     api<FileDiff>(`/api/rooms/${room.id}/git/diff?path=${encodeURIComponent(selected)}`)
-      .then((data) => { if (alive) setDiff(data); })
+      .then((data) => { if (alive) setDiff((prev) => (prev && prev.path === data.path && prev.diff === data.diff && prev.fullDiff === data.fullDiff ? prev : data)); })
       .catch(() => { if (alive) setDiff(null); });
     return () => { alive = false; };
-  }, [room.id, selected]);
+  }, [room.id, selected, statusRaw]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -907,7 +935,7 @@ function useGitRoom(room: Room | null) {
   // Self-scheduling (not setInterval) so a slow git status never lets the next poll stack
   // on top of it, and gated on document.hidden so a backgrounded/occluded window stops
   // spawning git. Refetch immediately on focus / becoming visible so nothing looks stale.
-  // The initial fetch is the effect above (888); first tick is scheduled at 4s.
+  // The initial fetch is the room-change effect above; first tick is scheduled at 4s.
   useEffect(() => {
     if (!roomId) return undefined;
     let alive = true;
@@ -1177,7 +1205,10 @@ function GitPanel({ room, git }: { room: Room; git: GitRoom }) {
       </div>
       {view === 'changes'
         ? <ChangesView room={room} status={git.status} branch={git.branch} onCommitted={() => { git.refresh(); }} />
-        : <HistoryView room={room} git={git} />}
+        // Keyed by room so a room switch remounts it — the selected commit hash from the
+        // previous room must not survive into this one. NOT keyed by reloadKey: a git op
+        // should refresh the list without dropping the user's selection.
+        : <HistoryView key={room.id} room={room} git={git} />}
     </div>
   );
 }
@@ -1307,7 +1338,7 @@ export function App() {
   // dropping you into an action menu you never opened.
   const [showCloneRoom, setShowCloneRoom] = useState(false);
   const [, setThemeTick] = useState(0);
-  const [activity, setActivity] = useState<Record<string, RoomActivity>>({});
+  const [roomStates, setRoomStates] = useState<Record<string, RoomState>>({});
   // When a room was last "seen" — attention older than this is acknowledged.
   const ackRef = useRef<Record<string, number>>({});
   // Sidebar collapse: railPref is the persisted user intent; forcedMini is a
@@ -1402,8 +1433,15 @@ export function App() {
       const match = /^room:([^:]+)/.exec(key);
       if (match && !liveRoomIds.has(match[1])) disposeTerminalResource(key);
     }
-    if (!selectedProjectId && projectData.projects[0]) setSelectedProjectId(projectData.projects[0].id);
-    if (!selectedRoomId && projectData.rooms[0]) setSelectedRoomId(projectData.rooms[0].id);
+    // Auto-select on first load: pick the project first, then a room IN that project —
+    // rooms[0] can belong to a different project, which would highlight one project in
+    // the sidebar while the workspace shows another's room.
+    const projectId = selectedProjectId || projectData.projects[0]?.id;
+    if (!selectedProjectId && projectId) setSelectedProjectId(projectId);
+    if (!selectedRoomId) {
+      const room = projectData.rooms.find((r) => r.projectId === projectId) ?? projectData.rooms[0];
+      if (room) setSelectedRoomId(room.id);
+    }
   }
   useEffect(() => { refresh().catch((err) => setError(err.message)); }, []);
 
@@ -1455,7 +1493,19 @@ export function App() {
           const data = await api<{ now: number; rooms: Record<string, RoomActivity> }>('/api/activity');
           if (!alive) return;
           if (selectedRoomId) ackRef.current[selectedRoomId] = Date.now();
-          setActivity(data.rooms);
+          // Derive states HERE, not at render: the state is time-decaying (thinking →
+          // idle after BUSY_MS of quiet) with an unchanged payload, so equality-guarding
+          // the raw payload would freeze the spinner. Deriving per tick and guarding the
+          // sparse result map means the app only re-renders when a state actually flips.
+          const next: Record<string, RoomState> = {};
+          for (const [id, act] of Object.entries(data.rooms)) {
+            const state = deriveRoomState(act, ackRef.current[id] ?? 0);
+            if (state !== 'idle') next[id] = state;
+          }
+          setRoomStates((prev) => {
+            const prevKeys = Object.keys(prev);
+            return prevKeys.length === Object.keys(next).length && prevKeys.every((key) => prev[key] === next[key]) ? prev : next;
+          });
         }
       } catch { /* host may be momentarily unreachable */ }
       finally { running = false; if (alive) timer = setTimeout(poll, 1200); }
@@ -1667,7 +1717,7 @@ export function App() {
       case 'KeyB': return hit(() => { if (shift) window.dispatchEvent(new Event('devrooms:branch-menu')); else toggleRail(); });
       case 'KeyN': return hit(() => { if (shift) { void pickProjectFolder(); } else { setShowCloneRoom(true); } });
       case 'KeyT': if (!shift && selectedRoom?.status === 'idle' && terminalCount < 6) return hit(() => { setTab('terminal'); void addTerminal(); }); return;
-      case 'KeyS': if (!shift && selectedRoom?.status === 'idle' && !git.merging) return hit(() => { void git.doOp(git.syncOp); }); return;
+      case 'KeyS': if (!shift && selectedRoom?.status === 'idle' && !git.merging && !git.syncing) return hit(() => { void git.doOp(git.syncOp); }); return;
       case 'KeyW': {
         if (shift) return;
         // Close the focused terminal tile (the main one is the room's shell, not
@@ -1743,7 +1793,7 @@ export function App() {
                         >
                           <span className="conn" aria-hidden="true">{last ? '└' : '├'}</span>
                           {room.status === 'idle'
-                            ? <AgentGlyph state={deriveRoomState(activity[room.id], ackRef.current[room.id] ?? 0)} />
+                            ? <AgentGlyph state={roomStates[room.id] ?? 'idle'} />
                             : <span className={`glyph ${room.status}`} aria-hidden="true">{STATUS_GLYPH[room.status]}</span>}
                           <span className="rbody">
                             <span className="rtop">
