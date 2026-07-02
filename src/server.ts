@@ -6,7 +6,6 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
-import pty from '@homebridge/node-pty-prebuilt-multiarch';
 
 const DEVROOMS_HOME = process.env.DEVROOMS_HOME ?? path.join(os.homedir(), '.devrooms');
 const ROOMS_ROOT = process.env.DEVROOMS_ROOMS_ROOT ?? path.join(os.homedir(), 'devrooms');
@@ -76,8 +75,6 @@ type ManagedProcess = {
   startedAt: string;
   exitedAt?: string;
   exitCode?: number;
-  pty?: pty.IPty;
-  log: string[];
 };
 
 type RunResult = {
@@ -384,6 +381,7 @@ async function upsertMainRoom(state: State, project: Project, rootPath: string) 
     kind: 'main',
     branch,
     status: 'idle',
+    terminals: existing?.terminals, // a branch switch must not drop the user's tiled terminals
     createdAt: existing?.createdAt ?? stamp,
     updatedAt: stamp,
   };
@@ -432,6 +430,46 @@ async function runGit(room: Room, args: string[], opts: { timeoutMs?: number } =
   return result;
 }
 
+// Git C-quotes status paths that contain quotes, backslashes, control characters or —
+// under the default core.quotepath — any non-ASCII byte: `"src/caf\303\251.ts"`. The
+// octal escapes are raw bytes of the UTF-8 encoding, so decode escapes to bytes first
+// and the whole byte run to a string second; otherwise every path-addressed op (stage,
+// discard, diff, conflict-marker stat) misses the real file.
+function unquoteGitPath(entry: string): string {
+  if (!entry.startsWith('"') || !entry.endsWith('"') || entry.length < 2) return entry;
+  const inner = entry.slice(1, -1);
+  const bytes: number[] = [];
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] !== '\\') { bytes.push(...Buffer.from(inner[i], 'utf8')); continue; }
+    const next = inner[++i];
+    if (next >= '0' && next <= '7') {
+      bytes.push(parseInt(inner.slice(i, i + 3), 8));
+      i += 2;
+    } else {
+      const control: Record<string, string> = { a: '\x07', b: '\b', t: '\t', n: '\n', v: '\v', f: '\f', r: '\r' };
+      bytes.push(...Buffer.from(control[next] ?? next ?? '', 'utf8'));
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+// A rename/copy status entry reads `orig -> new` (either side may be quoted); return
+// the new path. When orig is quoted, scan past its escapes to the closing quote so a
+// literal " -> " inside the old name can't split the entry early. An unquoted orig
+// containing " -> " is ambiguous in porcelain v1 itself — first match is the best
+// available reading.
+function renameTargetPath(entry: string): string {
+  if (entry.startsWith('"')) {
+    for (let i = 1; i < entry.length; i++) {
+      if (entry[i] === '\\') { i++; continue; }
+      if (entry[i] === '"') return entry.slice(i + 1).startsWith(' -> ') ? entry.slice(i + 5) : entry;
+    }
+    return entry;
+  }
+  const sep = entry.indexOf(' -> ');
+  return sep >= 0 ? entry.slice(sep + 4) : entry;
+}
+
 function parseStatus(raw: string) {
   const lines = raw.split('\n').filter(Boolean);
   const branchLine = lines.find((line) => line.startsWith('## ')) ?? '## unknown';
@@ -445,7 +483,7 @@ function parseStatus(raw: string) {
       return {
         index: x,
         workingTree: y,
-        path: line.slice(3),
+        path: unquoteGitPath(renameTargetPath(line.slice(3))),
         raw: line,
         staged: x !== ' ' && x !== '?',
         dirty: y !== ' ' || line.startsWith('??'),
@@ -475,28 +513,24 @@ async function hasConflictMarkers(absPath: string): Promise<boolean> {
   }
 }
 
-// The branch set only changes on checkout / fetch / branch create-delete — all of which
-// rewrite one of these .git paths. Fingerprinting their mtimes lets the 4s status poller
-// skip the `for-each-ref` spawn when refs are unchanged (the common case). origin/* is
-// nested (loose fetch-created refs land under refs/remotes/origin/<name> without bumping
-// the parent), so stat that dir directly; FETCH_HEAD (rewritten on every fetch) is a
-// cheap belt-and-suspenders. Sort order can lag if a terminal commit advances a branch
-// without changing the name set — acceptable for a picker.
+// Fingerprinting the ref state lets the 4s status poller skip the `for-each-ref` spawn
+// when branches are unchanged (the common case). Loose refs are listed by name recursively:
+// a slash-y branch lands at refs/heads/<a>/<b> and only bumps its immediate parent dir's
+// mtime, so a stat of refs/heads alone would miss it. Packed refs (git pack-refs, clones)
+// live in the packed-refs file, covered by its mtime; FETCH_HEAD (rewritten on every
+// fetch) is a cheap belt-and-suspenders. Sort order can lag if a terminal commit advances
+// a branch without changing the name set — acceptable for a picker.
 const branchCache = new Map<string, { fp: string; data: { name: string; committedAt: number }[] }>();
 
 async function branchFingerprint(room: Room): Promise<string> {
   const g = path.join(room.path, '.git');
-  const targets = [
-    path.join(g, 'HEAD'),
-    path.join(g, 'packed-refs'),
-    path.join(g, 'FETCH_HEAD'),
-    path.join(g, 'refs', 'heads'),
-    path.join(g, 'refs', 'remotes', 'origin'),
-  ];
-  const parts = await Promise.all(targets.map(async (p) => {
+  const stats = [path.join(g, 'HEAD'), path.join(g, 'packed-refs'), path.join(g, 'FETCH_HEAD')].map(async (p) => {
     try { return String((await fs.stat(p)).mtimeMs); } catch { return '-'; }
-  }));
-  return parts.join('|');
+  });
+  const names = [path.join(g, 'refs', 'heads'), path.join(g, 'refs', 'remotes', 'origin')].map(async (p) => {
+    try { return (await fs.readdir(p, { recursive: true })).sort().join(','); } catch { return '-'; }
+  });
+  return (await Promise.all([...stats, ...names])).join('|');
 }
 
 async function listBranches(room: Room): Promise<{ name: string; committedAt: number }[]> {
@@ -706,6 +740,12 @@ async function createRoom(projectId: string, body: unknown) {
   // it would collide with the main room (e.g. "main") and isn't a chosen task label.
   const rawName = typeof input.name === 'string' ? input.name.trim() : '';
   let name = rawName || explicitBranch || nextRoomHandle(state, project.id);
+  // A name whose own slug is empty (all emoji / non-Latin) can still yield a non-empty
+  // room id (the project prefix survives), but roomPath below joins slugify(name) — and
+  // an empty leaf would collapse the path onto the project's rooms PARENT dir, which a
+  // later delete-with-files would wipe wholesale. Regenerate the whole name so id, name
+  // and path stay consistent.
+  if (!slugify(name)) name = nextRoomHandle(state, project.id);
   let id = slugify(`${project.id}-${name}`);
   if (!id) throw new HttpError(400, 'room id is empty after slugification');
   // A non-typed name that collided (cloning the current branch when a same-named room
@@ -886,10 +926,11 @@ async function deleteRoom(roomId: string, body: unknown) {
   const cloneJob = cloneJobs.get(roomId);
   if (cloneJob && !cloneJob.killed) cloneJob.kill('SIGTERM');
   cloneJobs.delete(roomId);
-  // Liveness lives in the pty-host now, not the in-memory map (which has no
-  // local exit handler and goes stale), so reconcile against the host.
+  // Liveness lives in the pty-host, and identity in the PERSISTED records — the
+  // in-memory map is empty after a daemon restart, so trusting it here would skip
+  // the guard and orphan still-running PTYs in the host. Reconcile records × host.
   const hostRunning = await ptyHostRunningKeys();
-  const running = [...processes.values()].filter((proc) => proc.roomId === roomId && hostRunning.has(`proc:${proc.id}`));
+  const running = Object.values(state.processes).filter((record) => record.roomId === roomId && hostRunning.has(`proc:${record.id}`));
   if (running.length && !force) {
     throw new HttpError(409, `room has ${running.length} running process(es); kill them or pass force=true`);
   }
@@ -906,26 +947,30 @@ async function deleteRoom(roomId: string, body: unknown) {
     if (record.roomId === roomId) delete state.processes[id];
   }
   delete state.rooms[roomId];
-  gitSnapshotCache.delete(roomId); // drop the per-room git cache entry so it can't leak
+  // Drop every per-room cache entry so nothing leaks — and so a recreated room with
+  // the same id/path (deterministic slugs) starts fresh instead of inheriting stale
+  // branch lists or a hooks-already-installed marker pointing at deleted files.
+  gitSnapshotCache.delete(roomId);
+  roomLabelCache.delete(roomId);
+  defaultBranchCache.delete(roomId);
+  branchCache.delete(room.path);
+  agentHooksInstalled.delete(roomId);
   await saveState(state);
   if (deleteFiles) {
     await assertPathInside(ROOMS_ROOT, room.path);
-    await fs.rm(room.path, { recursive: true, force: true });
+    // A just-SIGTERMed clone (and its index-pack children) can still be writing under
+    // room.path; wait for it (bounded) and let rm retry, so a file appearing mid-removal
+    // can't fail the delete after state was already updated.
+    if (cloneJob && cloneJob.exitCode === null && cloneJob.signalCode === null) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 5000);
+        timer.unref();
+        cloneJob.once('close', () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    await fs.rm(room.path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
   return { room, deleteFiles, killed: running.length };
-}
-
-function appendPtyLog(log: string[], data: string) {
-  log.push(data);
-  if (log.length > 5000) log.splice(0, log.length - 5000);
-}
-
-function ptyLogTail(log: string[], maxChars = 4000) {
-  return log.join('').slice(-maxChars);
-}
-
-function processLogTail(proc: ManagedProcess) {
-  return ptyLogTail(proc.log);
 }
 
 // A room tiles multiple terminals. The "main" terminal keeps the bare
@@ -1050,7 +1095,6 @@ function recordFromProcess(proc: ManagedProcess): ProcessRecord {
     startedAt: proc.startedAt,
     exitedAt: proc.exitedAt,
     exitCode: proc.exitCode,
-    logTail: processLogTail(proc),
   };
 }
 
@@ -1097,15 +1141,13 @@ async function spawnProcess(room: Room, command: string, name?: string) {
     command,
     status: 'running',
     startedAt: now(),
-    log: [],
   };
   processes.set(id, managed);
   await saveProcessRecord(recordFromProcess(managed));
   return managed;
 }
 
-function processSummary(proc: ManagedProcess | ProcessRecord) {
-  const logTail = 'log' in proc ? processLogTail(proc) : proc.logTail ?? '';
+function processSummary(proc: ManagedProcess) {
   return {
     id: proc.id,
     roomId: proc.roomId,
@@ -1115,7 +1157,7 @@ function processSummary(proc: ManagedProcess | ProcessRecord) {
     startedAt: proc.startedAt,
     exitedAt: proc.exitedAt,
     exitCode: proc.exitCode,
-    logTail,
+    logTail: '', // the live tail streams from the pty-host; a just-spawned process has none
   };
 }
 
@@ -1187,8 +1229,7 @@ async function gitRoomLabel(room: Room, base?: string): Promise<string | undefin
   const status = await run('git', ['status', '--porcelain', '-uall'], room.path, { timeoutMs: 5_000 }).catch(() => undefined);
   if (status?.exitCode === 0) {
     const files = status.stdout.split('\n')
-      .map((line) => line.slice(3))
-      .map((entry) => (entry.includes(' -> ') ? entry.slice(entry.indexOf(' -> ') + 4) : entry))   // unwrap renames
+      .map((line) => unquoteGitPath(renameTargetPath(line.slice(3))))
       .filter(Boolean);
     if (files.length) {
       const dir = commonTopDir(files);
@@ -1255,11 +1296,13 @@ async function roomViews(rooms: Room[]) {
 // them. TTL is well under the poll intervals, so counts are at most ~1.5s staler than the
 // already-4–5s poll — invisible — and a mutating git op busts the room's entry immediately.
 const GIT_SNAPSHOT_TTL_MS = 1500;
-const gitSnapshotCache = new Map<string, { at: number; promise: Promise<{ status: RunResult; unpushed: number }> }>();
+const gitSnapshotCache = new Map<string, { at: number; settled: boolean; promise: Promise<{ status: RunResult; unpushed: number }> }>();
 
 function gitSnapshot(room: Room): Promise<{ status: RunResult; unpushed: number }> {
   const hit = gitSnapshotCache.get(room.id);
-  if (hit && Date.now() - hit.at < GIT_SNAPSHOT_TTL_MS) return hit.promise;
+  // An unsettled entry is always shared — a slow spawn outliving the TTL must not
+  // let the next poller pile a duplicate git pair on top of the wedged one.
+  if (hit && (!hit.settled || Date.now() - hit.at < GIT_SNAPSHOT_TTL_MS)) return hit.promise;
   const promise = (async () => {
     const status = await run('git', ['status', '--porcelain=v1', '-b'], room.path, { timeoutMs: 5000 });
     let unpushed = 0;
@@ -1270,9 +1313,16 @@ function gitSnapshot(room: Room): Promise<{ status: RunResult; unpushed: number 
     }
     return { status, unpushed };
   })();
-  // A transient failure (timeout 504, wedged git) must not be pinned for the whole TTL.
-  promise.catch(() => gitSnapshotCache.delete(room.id));
-  gitSnapshotCache.set(room.id, { at: Date.now(), promise });
+  const entry = { at: Date.now(), settled: false, promise };
+  promise.then(
+    () => { entry.settled = true; },
+    () => {
+      // A transient failure (timeout 504, wedged git) must not be pinned for the whole
+      // TTL — but only evict our own entry, not one a mutating git op already replaced.
+      if (gitSnapshotCache.get(room.id) === entry) gitSnapshotCache.delete(room.id);
+    },
+  );
+  gitSnapshotCache.set(room.id, entry);
   return promise;
 }
 
@@ -1310,28 +1360,6 @@ function metaSummary(state: State) {
   };
 }
 
-async function killAllProcesses() {
-  // No-op: PTYs live in the standalone pty-host so they survive daemon restarts.
-  // The host is torn down separately (dev runner shutdown / electron quit).
-}
-
-function wirePtySocket(ws: WebSocket, child: pty.IPty, replay = '') {
-  if (replay) ws.send(JSON.stringify({ type: 'output', data: replay }));
-  const disposable = child.onData((data) => {
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'output', data }));
-  });
-  ws.on('message', (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number };
-      if (msg.type === 'input' && typeof msg.data === 'string') child.write(msg.data);
-      if (msg.type === 'resize' && msg.cols && msg.rows) child.resize(msg.cols, msg.rows);
-    } catch (error) {
-      ws.send(JSON.stringify({ type: 'output', data: `\r\n[devrooms websocket error] ${String(error)}\r\n` }));
-    }
-  });
-  ws.on('close', () => disposable.dispose());
-}
-
 const PTY_HOST_PORT = PORT + 1;
 const PTY_HOST_URL = `http://127.0.0.1:${PTY_HOST_PORT}`;
 
@@ -1348,7 +1376,11 @@ async function ptyHostFetch(pathAndQuery: string, init?: RequestInit, timeoutMs 
 function freePtyHostPort() {
   if (process.platform === 'win32') return;
   try {
-    spawnSync('sh', ['-c', `lsof -ti tcp:${PTY_HOST_PORT} | xargs kill -9`], { stdio: 'ignore', timeout: 3000 });
+    // -sTCP:LISTEN is load-bearing: a bare `lsof -ti tcp:<port>` also matches processes
+    // holding CLIENT sockets to that port — including this daemon's own keep-alive
+    // connections to the host — so without it the recovery path SIGKILLs the daemon
+    // itself (and, in dev, Vite's proxied sockets) instead of the wedged listener.
+    spawnSync('sh', ['-c', `lsof -ti tcp:${PTY_HOST_PORT} -sTCP:LISTEN | xargs kill -9`], { stdio: 'ignore', timeout: 3000 });
   } catch {
     /* noop */
   }
@@ -1363,7 +1395,16 @@ async function ptyHostHealthy() {
   }
 }
 
-async function ensurePtyHost() {
+// Single-flight: concurrent callers (terminal opens racing WS upgrades at boot) share
+// one health-check/spawn instead of double-spawning hosts that then fight over the port.
+// Reset in finally on BOTH outcomes, so one failed ensure never poisons later spawns.
+let ptyHostEnsuring: Promise<void> | null = null;
+function ensurePtyHost(): Promise<void> {
+  if (!ptyHostEnsuring) ptyHostEnsuring = doEnsurePtyHost().finally(() => { ptyHostEnsuring = null; });
+  return ptyHostEnsuring;
+}
+
+async function doEnsurePtyHost() {
   if (await ptyHostHealthy()) return;
   // Not healthy: a wedged predecessor may still hold the port and would block a fresh
   // host from binding — clear it before spawning.
@@ -1778,11 +1819,14 @@ async function main() {
         // markers (resolved-but-unstaged is fine), then stage the resolved tracked
         // files and commit with the prepared merge message.
         if ((await run('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], room.path)).exitCode !== 0) throw new HttpError(409, 'no merge in progress');
-        const unmerged = (await run('git', ['diff', '--name-only', '--diff-filter=U'], room.path)).stdout.split('\n').filter(Boolean);
+        // -z: NUL separators and no C-quoting, so non-ASCII paths stat and stage correctly.
+        const unmerged = (await run('git', ['diff', '--name-only', '-z', '--diff-filter=U'], room.path)).stdout.split('\0').filter(Boolean);
         const unresolved: string[] = [];
         for (const file of unmerged) if (await hasConflictMarkers(path.join(room.path, file))) unresolved.push(file);
         if (unresolved.length) throw new HttpError(409, `unresolved conflict markers in: ${unresolved.join(', ')}`);
-        await runGit(room, ['add', '-u']);
+        // Stage only the conflicted files — `add -u` would sweep the user's unrelated
+        // working-tree edits into the merge commit.
+        if (unmerged.length) await runGit(room, ['add', '--', ...unmerged]);
         result = await runGit(room, ['commit', '--no-edit']);
       } else {
         throw new HttpError(404, `unknown git operation: ${op}`);
@@ -2008,15 +2052,11 @@ async function main() {
     console.log(`rooms: ${ROOMS_ROOT}`);
   });
 
+  // PTYs live in the standalone pty-host and deliberately survive this shutdown;
+  // the host is torn down separately (pnpm stop / electron quit).
   const shutdown = () => {
-    void (async () => {
-      await killAllProcesses();
-      server.close(() => process.exit(0));
-      setTimeout(() => process.exit(0), 1000).unref();
-    })().catch((error) => {
-      console.error('failed to persist process shutdown', error);
-      process.exit(1);
-    });
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1000).unref();
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
