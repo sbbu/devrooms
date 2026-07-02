@@ -647,6 +647,29 @@ function AgentGlyph({ state }: { state: RoomState }) {
   return <span className="glyph idle">●</span>;
 }
 
+// Document-level ↑/↓ selection for the changes/history lists. Lives on document (not a
+// focused element) so the list navigates while the terminal — or nothing — holds focus.
+// Skips when an overlay (palette, branch menu, confirm popup) owns the arrow keys, even
+// during the brief gap before the overlay has taken focus, and when a real edit field
+// (including xterm's hidden helper textarea) is the target.
+function useArrowNav<T>(items: T[], selectedKey: string | null, keyOf: (item: T) => string, onSelect: (key: string) => void) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      if (document.querySelector('.cmd-overlay')) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
+      if (!items.length) return;
+      const index = Math.max(0, items.findIndex((item) => keyOf(item) === selectedKey));
+      const next = event.key === 'ArrowDown' ? Math.min(items.length - 1, index + 1) : Math.max(0, index - 1);
+      onSelect(keyOf(items[next]));
+      event.preventDefault();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [items, selectedKey, keyOf, onSelect]);
+}
+
 function ChangesView({ room, status, branch, onCommitted }: { room: Room; status: GitStatus | null; branch: string; onCommitted: () => Promise<void> | void }) {
   const files = status?.status.files ?? [];
   const merging = status?.status.merging ?? false;
@@ -678,24 +701,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
     return () => { alive = false; };
   }, [room.id, selected, statusRaw]);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-      // Any open overlay (palette, branch menu, confirm popup) owns the arrow keys —
-      // don't move file selection underneath it, even during the brief gap before the
-      // overlay has taken focus.
-      if (document.querySelector('.cmd-overlay')) return;
-      const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
-      if (!files.length) return;
-      const index = Math.max(0, files.findIndex((file) => file.path === selected));
-      const next = event.key === 'ArrowDown' ? Math.min(files.length - 1, index + 1) : Math.max(0, index - 1);
-      setSelected(files[next].path);
-      event.preventDefault();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [files, selected]);
+  useArrowNav(files, selected, (file) => file.path, setSelected);
 
   useEffect(() => { document.querySelector('.chg-file.sel')?.scrollIntoView({ block: 'nearest' }); }, [selected]);
 
@@ -849,20 +855,9 @@ function HistoryView({ room, git }: { room: Room; git: GitRoom }) {
     return () => { alive = false; };
   }, [room.id, selected, file]);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-      const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
-      if (!commits.length) return;
-      const index = Math.max(0, commits.findIndex((commit) => commit.hash === selected));
-      const next = event.key === 'ArrowDown' ? Math.min(commits.length - 1, index + 1) : Math.max(0, index - 1);
-      setSelected(commits[next].hash);
-      event.preventDefault();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [commits, selected]);
+  // Shared hook (vs the old inline copy): history also gains the overlay guard, so an
+  // open palette/confirm no longer moves the commit selection underneath it.
+  useArrowNav(commits, selected, (commit) => commit.hash, setSelected);
 
   useEffect(() => { document.querySelector('.commit-row.sel')?.scrollIntoView({ block: 'nearest' }); }, [selected]);
 
@@ -1037,6 +1032,39 @@ type GitRoom = ReturnType<typeof useGitRoom>;
 // select + new-branch field with one keyboard-driven picker.
 type BranchRow = { id: string; title: string; hint?: string; age?: string; checked?: boolean; act: () => void };
 
+// Query-ranked picker rows. Scores against text(row) so each picker chooses what is
+// searchable — the branch menu matches hints too, the clone dialog titles only. Ties
+// keep the original (recency) order.
+function rankRows(base: BranchRow[], q: string, text: (row: BranchRow) => string): BranchRow[] {
+  if (!q) return base;
+  return base.map((r, i) => ({ r, s: score(q, text(r)), i })).filter((e) => e.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((e) => e.r);
+}
+
+// The shared .cmd-list body of the palette-style pickers (branch menu, clone dialog):
+// highlight follows the mouse; mousedown acts without stealing focus from the input.
+function PickerList({ rows, idx, setIndex, listRef, empty }: {
+  rows: BranchRow[];
+  idx: number;
+  setIndex: (i: number) => void;
+  listRef: React.RefObject<HTMLDivElement | null>;
+  empty: string;
+}) {
+  return (
+    <div className="cmd-list" ref={listRef}>
+      {rows.length ? rows.map((row, i) => (
+        <div key={row.id} className={i === idx ? 'cmd-row sel' : 'cmd-row'} onMouseMove={() => setIndex(i)} onMouseDown={(event) => { event.preventDefault(); row.act(); }}>
+          <span className="cmd-main">
+            <span className="cmd-title">{row.title}</span>
+            {row.hint && <span className="cmd-hint">{row.hint}</span>}
+          </span>
+          {row.age && <span className="branch-age">{row.age}</span>}
+          {row.checked && <span className="cmd-check">●</span>}
+        </div>
+      )) : <div className="cmd-empty">{empty}</div>}
+    </div>
+  );
+}
+
 function BranchMenu({ open, onClose, current, branches, canMerge, onCheckout, onCreate, onMerge }: {
   open: boolean;
   onClose: () => void;
@@ -1074,9 +1102,7 @@ function BranchMenu({ open, onClose, current, branches, canMerge, onCheckout, on
   } else {
     for (const b of branches.filter((b) => b.name !== current)) base.push({ id: `mg:${b.name}`, title: b.name, age: relAge(b.committedAt), act: () => { onMerge(b.name); onClose(); } });
   }
-  let rows = q
-    ? base.map((r, i) => ({ r, s: score(q, `${r.title} ${r.hint ?? ''}`), i })).filter((e) => e.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((e) => e.r)
-    : base;
+  let rows = rankRows(base, q, (r) => `${r.title} ${r.hint ?? ''}`);
   // Type a name that isn't an existing branch → offer to create it (switch mode only).
   if (mode === 'switch' && q && !branches.some((b) => b.name === q)) {
     rows = [...rows, { id: '_create', title: `create branch “${q}”`, age: 'new', act: () => { onCreate(q); onClose(); } }];
@@ -1103,18 +1129,7 @@ function BranchMenu({ open, onClose, current, branches, canMerge, onCheckout, on
           <input ref={inputRef} value={query} onChange={(event) => { setQuery(event.target.value); setIndex(0); }} onKeyDown={onKeyDown}
             placeholder={mode === 'merge' ? 'pick a branch to merge…' : 'switch branch, or type a new name…'} spellCheck={false} autoComplete="off" />
         </div>
-        <div className="cmd-list" ref={listRef}>
-          {rows.length ? rows.map((row, i) => (
-            <div key={row.id} className={i === idx ? 'cmd-row sel' : 'cmd-row'} onMouseMove={() => setIndex(i)} onMouseDown={(event) => { event.preventDefault(); row.act(); }}>
-              <span className="cmd-main">
-                <span className="cmd-title">{row.title}</span>
-                {row.hint && <span className="cmd-hint">{row.hint}</span>}
-              </span>
-              {row.age && <span className="branch-age">{row.age}</span>}
-              {row.checked && <span className="cmd-check">●</span>}
-            </div>
-          )) : <div className="cmd-empty">no matches</div>}
-        </div>
+        <PickerList rows={rows} idx={idx} setIndex={setIndex} listRef={listRef} empty="no matches" />
         <div className="cmd-foot">
           <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
           <span><kbd>↵</kbd> select</span>
@@ -1270,9 +1285,7 @@ function NewRoomDialog({ open, onClose, projectName, defaultBranch, branchSource
     id: `cl:${b.name}`, title: b.name, age: relAge(b.committedAt), checked: b.name === defaultBranch,
     act: () => { if (!disabled) { onClone(b.name); onClose(); } },
   }));
-  let rows = q
-    ? base.map((r, i) => ({ r, s: score(q, r.title), i })).filter((e) => e.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).map((e) => e.r)
-    : base;
+  let rows = rankRows(base, q, (r) => r.title);
   // Typed something that isn't an existing branch → offer to clone off it anyway (covers
   // a repo whose branch list hasn't loaded, or an exact ref you know by name).
   if (q && !branches.some((b) => b.name === q)) {
@@ -1299,18 +1312,7 @@ function NewRoomDialog({ open, onClose, projectName, defaultBranch, branchSource
           <input ref={inputRef} value={query} onChange={(event) => { setQuery(event.target.value); setIndex(0); }} onKeyDown={onKeyDown}
             placeholder="clone off a branch — search or type a name…" spellCheck={false} autoComplete="off" />
         </div>
-        <div className="cmd-list" ref={listRef}>
-          {rows.length ? rows.map((row, i) => (
-            <div key={row.id} className={i === idx ? 'cmd-row sel' : 'cmd-row'} onMouseMove={() => setIndex(i)} onMouseDown={(event) => { event.preventDefault(); row.act(); }}>
-              <span className="cmd-main">
-                <span className="cmd-title">{row.title}</span>
-                {row.hint && <span className="cmd-hint">{row.hint}</span>}
-              </span>
-              {row.age && <span className="branch-age">{row.age}</span>}
-              {row.checked && <span className="cmd-check">●</span>}
-            </div>
-          )) : <div className="cmd-empty">no branches — type a name to clone off it</div>}
-        </div>
+        <PickerList rows={rows} idx={idx} setIndex={setIndex} listRef={listRef} empty="no branches — type a name to clone off it" />
         <div className="cmd-foot">
           <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
           <span><kbd>↵</kbd> clone room</span>
