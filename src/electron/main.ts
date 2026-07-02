@@ -9,6 +9,20 @@ const serverUrl = process.env.DEVROOMS_SERVER_URL ?? `http://127.0.0.1:${port}`;
 const shouldUseExternalServer = Boolean(process.env.DEVROOMS_SERVER_URL);
 let daemon: ChildProcessWithoutNullStreams | undefined;
 let mainWindow: BrowserWindow | undefined;
+let quitting = false;
+
+// Two live instances fight over the daemon port — the second's boot even SIGKILLs the
+// first's pty-host (freePtyHostPort), nuking its live terminals. Only the packaged app
+// takes the lock: a dev checkout shares the same userData dir, so an unconditional lock
+// would keep `pnpm dev` from coexisting with the installed app.
+if (app.isPackaged && !app.requestSingleInstanceLock()) {
+  app.quit();
+}
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+});
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char]!);
@@ -27,7 +41,9 @@ h1{font-size:18px;margin:0 0 10px;font-weight:normal}p{color:#6b7079;line-height
 }
 
 async function loadStatusPage(title: string, body: string) {
-  await mainWindow?.loadURL(statusPage(title, body));
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // A navigation rejected because the user closed the window mid-load is cosmetic.
+  await mainWindow.loadURL(statusPage(title, body)).catch(() => {});
 }
 
 async function sleep(ms: number) {
@@ -36,7 +52,9 @@ async function sleep(ms: number) {
 
 async function isHealthy() {
   try {
-    const res = await fetch(`${serverUrl}/api/health`);
+    // Bounded: a wedged daemon that accepts but never answers must read as unhealthy,
+    // not hang the probe (and with it the boot) indefinitely.
+    const res = await fetch(`${serverUrl}/api/health`, { signal: AbortSignal.timeout(1500) });
     return res.ok;
   } catch {
     return false;
@@ -65,7 +83,10 @@ function freePtyHostPort(p: number): Promise<void> {
   return new Promise((resolve) => {
     let done = false;
     const finish = () => { if (done) return; done = true; clearTimeout(timer); resolve(); };
-    const child = spawn('sh', ['-c', `lsof -ti tcp:${p} | xargs kill -9`], { stdio: 'ignore' });
+    // -sTCP:LISTEN scopes the kill to the listener: a bare `lsof -ti tcp:<port>` also
+    // matches processes merely CONNECTED to it (a still-running daemon's client socket),
+    // and SIGKILLing those takes out the wrong process.
+    const child = spawn('sh', ['-c', `lsof -ti tcp:${p} -sTCP:LISTEN | xargs kill -9`], { stdio: 'ignore' });
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } finish(); }, 3000);
     child.on('exit', finish);
     child.on('error', finish); // missing sh/lsof — resolve now instead of waiting out the 3s
@@ -84,17 +105,40 @@ async function ensureDaemon() {
   }
 
   const serverEntry = path.resolve(__dirname, '../server.js');
-  daemon = spawn(process.execPath, [serverEntry], {
+  const child = spawn(process.execPath, [serverEntry], {
     cwd: path.resolve(__dirname, '..'),
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(port) },
   });
-  daemon.stdout.on('data', (chunk) => process.stdout.write(`[devroomsd] ${chunk}`));
-  daemon.stderr.on('data', (chunk) => process.stderr.write(`[devroomsd] ${chunk}`));
-  daemon.on('exit', (code, signal) => {
-    console.log(`[devroomsd] exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
-    daemon = undefined;
+  daemon = child;
+  // Keep a stderr tail so a boot crash surfaces its actual error on the failure
+  // page instead of a generic 10s health timeout.
+  const stderrTail: string[] = [];
+  child.stdout.on('data', (chunk) => process.stdout.write(`[devroomsd] ${chunk}`));
+  child.stderr.on('data', (chunk) => {
+    process.stderr.write(`[devroomsd] ${chunk}`);
+    stderrTail.push(String(chunk));
+    if (stderrTail.length > 20) stderrTail.shift();
   });
-  await waitForDaemon();
+  // Created BEFORE the health polling starts, so an instant crash (port conflict,
+  // module error) is observed rather than racing the first poll.
+  const exited = new Promise<never>((_, reject) => {
+    child.on('exit', (code, signal) => {
+      console.log(`[devroomsd] exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+      if (daemon === child) daemon = undefined;
+      reject(new Error(`daemon exited (code=${code ?? 'null'} signal=${signal ?? 'null'})\n${stderrTail.join('').trim()}`));
+      // An exit after boot succeeded means the app is now a dead shell — say so
+      // instead of leaving a frozen UI (unless we're the ones quitting).
+      if (!quitting) {
+        void loadStatusPage(
+          'devrooms daemon stopped',
+          `<p>The local daemon exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).</p><pre>${escapeHtml(stderrTail.join('').trim() || 'no stderr output')}</pre><p>Quit and reopen devrooms.</p>`,
+        );
+      }
+    });
+  });
+  // The race keeps `exited` handled for the process's whole life, so its rejection
+  // at normal quit time never surfaces as an unhandledRejection.
+  await Promise.race([waitForDaemon(), exited]);
 }
 
 async function createWindow() {
@@ -134,10 +178,14 @@ async function createWindow() {
     void shell.openExternal(url);
     return { action: 'deny' };
   });
+  // Drop the reference once closed so later navigations (status pages, daemon-exit
+  // notices) see "no window" instead of throwing on a destroyed one.
+  mainWindow.on('closed', () => { mainWindow = undefined; });
   try {
     if (!healthy) await loadStatusPage('Starting devrooms', `<p>Starting local daemon at <code>${escapeHtml(serverUrl)}</code>…</p>`);
     await daemonReady;
-    await mainWindow.loadURL(serverUrl);
+    // The window can be closed while the daemon boots; navigation then has no target.
+    if (mainWindow && !mainWindow.isDestroyed()) await mainWindow.loadURL(serverUrl);
   } catch (error) {
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
     await loadStatusPage(
@@ -218,6 +266,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  quitting = true;
   if (daemon && !daemon.killed) daemon.kill('SIGTERM');
   // The detached pty-host is left running across a quit, but the NEXT launch starts
   // it fresh (see ensureDaemon) — reattaching a reused host to a relaunched renderer

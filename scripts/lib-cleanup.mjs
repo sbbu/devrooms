@@ -19,6 +19,18 @@ function sh(cmd) {
   }
 }
 
+// pkill -f matches an ERE against the whole command line, and the pattern rides
+// inside a shell command — so the repo path needs BOTH layers escaped: regex
+// metacharacters (a path with `+` or `(` would silently match nothing) and shell
+// quoting (spaces or quotes would split the argument).
+function ere(literal) {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 export function killByPort(port) {
   // Listener only — never connected clients (e.g. vite proxying to the daemon),
   // so cleaning the daemon can't take vite down as collateral.
@@ -29,7 +41,7 @@ export function killByPort(port) {
 // stray `tsx watch src/server.ts` from this repo that may not be bound.
 export function killStaleDaemon(root, port) {
   killByPort(port);
-  sh(`pkill -f "${root}/node_modules/.*tsx/dist/cli.mjs watch src/server.ts" 2>/dev/null || true`);
+  sh(`pkill -f ${shellQuote(`${ere(root)}/node_modules/.*tsx/dist/cli\\.mjs watch src/server\\.ts`)} 2>/dev/null || true`);
 }
 
 export function killStaleVite(vitePort = 5177) {
@@ -37,7 +49,7 @@ export function killStaleVite(vitePort = 5177) {
 }
 
 export function killStaleElectron(root) {
-  sh(`pkill -f "${root}/dist/electron/main.js" 2>/dev/null || true`);
+  sh(`pkill -f ${shellQuote(`${ere(root)}/dist/electron/main\\.js`)} 2>/dev/null || true`);
 }
 
 // Wait until a TCP port is free (the killed process has released it) so the

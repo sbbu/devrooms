@@ -45,6 +45,7 @@ export function conflictedSources(watchDir, excludeDir) {
 export function superviseReload({ cmd, args, cwd, env, watchDir, excludeDir, label = 'process', debounceMs = 250, log = console.error }) {
   let child = null;
   let stopping = false;
+  let restartPending = false; // an old child got SIGTERM and its exit will call start()
   let timer = null;
   const rel = (file) => path.relative(cwd, file);
 
@@ -52,6 +53,7 @@ export function superviseReload({ cmd, args, cwd, env, watchDir, excludeDir, lab
     log(`\n⚠ merge conflict markers in:\n   ${bad.map(rel).join('\n   ')}\n   ${label} NOT reloaded — resolve the merge (commit merge / abort) to resume.\n`);
   }
   function start() {
+    restartPending = false;
     const proc = spawn(cmd, args, { cwd, env, stdio: 'inherit' });
     proc.alive = true;
     // Bind to THIS proc, not the shared `child` (which reload() reassigns) — otherwise
@@ -66,8 +68,10 @@ export function superviseReload({ cmd, args, cwd, env, watchDir, excludeDir, lab
     const bad = conflictedSources(watchDir, excludeDir);
     if (bad.length) { warnConflicts(bad); return; } // keep the current child alive
     log(`↻ reloading ${label} (${trigger})`);
-    if (child && child.alive) { const old = child; child = null; old.once('exit', start); old.kill('SIGTERM'); }
-    else start();
+    if (child && child.alive) { const old = child; child = null; restartPending = true; old.once('exit', start); old.kill('SIGTERM'); }
+    // While a restart is in flight, do nothing: the queued start() already picks up
+    // the latest code, and starting here would race it into two live children.
+    else if (!restartPending) start();
   }
 
   const initial = conflictedSources(watchDir, excludeDir);
