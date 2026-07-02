@@ -1,5 +1,7 @@
 # Agent instructions
 
+devrooms (this repo) is a local app that runs coding agents in parallel git clones called rooms; this checkout may be one of several rooms working on the repo simultaneously.
+
 ## Committing
 
 When you finish a piece of work, **commit it to the current branch — even if that
