@@ -1186,6 +1186,11 @@ function devroomEnv(room: Room): NodeJS.ProcessEnv {
   };
   // The app/project name is never an env var — don't leak it into terminals.
   delete env.DEVROOMS_PROJECT_NAME;
+  // The daemon's own PORT must not leak either: generic dev servers (next, express)
+  // honor $PORT, so an agent's `next dev` in a room would try to bind the daemon's
+  // port, collide, and "fix" it by killing whatever listens there — i.e. the daemon.
+  delete env.PORT;
+  delete env.DEVROOMS_PORT;
   return env;
 }
 

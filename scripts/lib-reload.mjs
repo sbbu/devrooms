@@ -52,15 +52,34 @@ export function superviseReload({ cmd, args, cwd, env, watchDir, excludeDir, lab
   function warnConflicts(bad) {
     log(`\n⚠ merge conflict markers in:\n   ${bad.map(rel).join('\n   ')}\n   ${label} NOT reloaded — resolve the merge (commit merge / abort) to resume.\n`);
   }
+  let backoffMs = 1000;
   function start() {
     restartPending = false;
     const proc = spawn(cmd, args, { cwd, env, stdio: 'inherit' });
     proc.alive = true;
+    const bornAt = Date.now();
     // Bind to THIS proc, not the shared `child` (which reload() reassigns) — otherwise
     // an old child's exit would mutate the new child / a null.
     proc.on('exit', (code, signal) => {
       proc.alive = false;
       if (stopping) process.exit(code ?? (signal ? 1 : 0));
+      // A reload owns this exit: it queued start() behind this handler.
+      if (restartPending || child !== proc) return;
+      // Unexpected death — a crash, or something external killed it (a port fight,
+      // `pnpm stop` from another checkout). Without a respawn the API would stay dead
+      // until the next source edit. Backoff so a boot-crash loop doesn't spin; a child
+      // that stayed up a while means the crash loop is over, so the backoff resets.
+      if (Date.now() - bornAt > 10_000) backoffMs = 1000;
+      const wait = backoffMs;
+      backoffMs = Math.min(backoffMs * 2, 10_000);
+      log(`✖ ${label} exited (code=${code ?? 'null'} signal=${signal ?? 'null'}) — restarting in ${wait / 1000}s`);
+      child = null;
+      setTimeout(() => {
+        if (stopping || restartPending || (child && child.alive)) return;
+        const bad = conflictedSources(watchDir, excludeDir);
+        if (bad.length) { warnConflicts(bad); return; } // the watcher reloads once resolved
+        start();
+      }, wait);
     });
     child = proc;
   }

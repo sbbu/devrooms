@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { killStaleDaemon, killStaleVite, killStaleElectron, killByPort, waitPortFree } from './lib-cleanup.mjs';
+import { superviseReload } from './lib-reload.mjs';
 
 const bin = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const root = process.cwd();
@@ -35,8 +36,10 @@ function start(name, command, args, extraEnv = {}) {
 }
 
 let shuttingDown = false;
+let daemon = null; // superviseReload handle, set after cleanup below
 function shutdown(code = 0) {
   shuttingDown = true;
+  daemon?.stop('SIGTERM');
   for (const child of children) {
     if (!child.killed) child.kill('SIGTERM');
   }
@@ -80,7 +83,19 @@ console.log('[devrooms] compiling Electron main once...');
 const tscOnce = spawnSync(bin('tsc'), ['-p', 'tsconfig.electron.json'], { cwd: root, env: baseEnv, stdio: 'inherit' });
 if (tscOnce.status !== 0) process.exit(tscOnce.status ?? 1);
 
-start('daemon', bin('tsx'), ['watch', 'src/server.ts']);
+// Supervised like `pnpm dev` (not bare `tsx watch`): reloads on src edits, never
+// mid-merge-conflict, and respawns if the daemon dies unexpectedly — tsx watch
+// would leave the API dead until the next source edit.
+daemon = superviseReload({
+  cmd: bin('tsx'),
+  args: ['src/server.ts'],
+  cwd: root,
+  env: baseEnv,
+  watchDir: path.join(root, 'src'),
+  excludeDir: path.join(root, 'src', 'client'),
+  label: 'daemon',
+  log: console.error,
+});
 start('ui', bin('vite'), ['--host', '127.0.0.1']);
 start('electron-tsc', bin('tsc'), ['-p', 'tsconfig.electron.json', '--watch', '--preserveWatchOutput']);
 

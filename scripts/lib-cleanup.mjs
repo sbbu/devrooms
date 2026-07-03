@@ -38,10 +38,11 @@ export function killByPort(port) {
 }
 
 // Kill a previous daemon for this repo: the one holding our port, plus any
-// stray `tsx watch src/server.ts` from this repo that may not be bound.
+// stray `tsx [watch] src/server.ts` from this repo that may not be bound
+// (superviseReload spawns without `watch`; older sessions used `tsx watch`).
 export function killStaleDaemon(root, port) {
   killByPort(port);
-  sh(`pkill -f ${shellQuote(`${ere(root)}/node_modules/.*tsx/dist/cli\\.mjs watch src/server\\.ts`)} 2>/dev/null || true`);
+  sh(`pkill -f ${shellQuote(`${ere(root)}/node_modules/.*tsx/dist/cli\\.mjs (watch )?src/server\\.ts`)} 2>/dev/null || true`);
 }
 
 export function killStaleVite(vitePort = 5177) {
