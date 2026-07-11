@@ -75,7 +75,7 @@ function fileGutter(file: GitFile): { ch: string; cls: string } {
   if (file.conflicted) return { ch: '!', cls: 'conflict' };
   if (file.raw.startsWith('??')) return { ch: '?', cls: 'new' };
   if (file.index.trim() && file.workingTree.trim()) return { ch: '±', cls: 'mixed' };
-  if (file.index === 'R' || file.index === 'C') return { ch: 'R', cls: 'staged' };
+  if (file.index === 'R' || file.index === 'C') return { ch: file.index, cls: 'staged' };
   if (file.index.trim()) return { ch: 'S', cls: 'staged' };
   if (file.workingTree.trim()) return { ch: 'M', cls: 'modified' };
   return { ch: '•', cls: 'modified' };

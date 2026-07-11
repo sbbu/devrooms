@@ -480,8 +480,10 @@ function renameTargetPath(entry: string): string {
 // Rename entries surface to the client as their TARGET path only, but git-op pathspecs
 // must also cover the rename SOURCE (the staged deletion) — otherwise commit/stage/
 // unstage handle half the rename (committing a duplicate file) and discard treats the
-// target as untracked and deletes it. Resolves targets → sources from a fresh porcelain
-// read; callers must resolve BEFORE any `git reset`, which dissolves rename entries.
+// target as untracked and deletes it. Copies deliberately do not map to their source:
+// discard must never restore the source and erase unrelated source edits. Resolves
+// targets → sources from a fresh porcelain read; callers must resolve BEFORE any
+// `git reset`, which dissolves rename entries.
 async function renameSources(room: Room, files: string[]): Promise<Map<string, string>> {
   const wanted = new Set(files);
   const sources = new Map<string, string>();
@@ -490,7 +492,7 @@ async function renameSources(room: Room, files: string[]): Promise<Map<string, s
   for (const line of status.stdout.split('\n')) {
     if (!line) continue;
     const { orig, target } = splitRenameEntry(line.slice(3));
-    if (orig !== undefined && wanted.has(unquoteGitPath(target))) sources.set(unquoteGitPath(target), unquoteGitPath(orig));
+    if ((line[0] === 'R' || line[1] === 'R') && orig !== undefined && wanted.has(unquoteGitPath(target))) sources.set(unquoteGitPath(target), unquoteGitPath(orig));
   }
   return sources;
 }
