@@ -1866,8 +1866,8 @@ export function App() {
           {!selectedRoom && <div className="splash"><strong>no room selected</strong><span>create a project from a local repo for a main room, or clone a separate room</span></div>}
           {selectedRoom && selectedRoom.status !== 'idle' && (
             <div className={`splash room-state ${selectedRoom.status}`}>
-              <strong>{selectedRoom.status === 'creating' ? 'cloning room…' : 'room clone failed'}</strong>
-              <span>{selectedRoom.status === 'creating' ? 'cloning in the background — this view refreshes automatically' : selectedRoom.error}</span>
+              <strong>{selectedRoom.status === 'creating' ? 'setting up room…' : 'room setup failed'}</strong>
+              <span>{selectedRoom.status === 'creating' ? 'cloning and preparing the room in the background — this view refreshes automatically' : selectedRoom.error}</span>
               <button className="retry" onClick={() => refresh()}>refresh now</button>
             </div>
           )}

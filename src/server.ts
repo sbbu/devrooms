@@ -927,6 +927,32 @@ async function copyGitTownConfig(srcRoot: string, destRoot: string): Promise<num
   return copied;
 }
 
+async function isPnpmProject(root: string): Promise<boolean> {
+  try {
+    const pkg = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')) as { packageManager?: unknown };
+    if (typeof pkg.packageManager === 'string') return /^pnpm(?:@|$)/.test(pkg.packageManager);
+  } catch { /* missing or malformed package.json — lock/workspace markers still identify pnpm */ }
+
+  for (const marker of ['pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
+    try { await fs.access(path.join(root, marker)); return true; } catch { /* try the next marker */ }
+  }
+  return false;
+}
+
+async function installPnpmDependencies(room: Room): Promise<void> {
+  if (room.kind !== 'clone' || !(await isPnpmProject(room.path))) return;
+  console.log(`devrooms: installing pnpm dependencies in ${room.path}`);
+  const install = await run('pnpm', ['i'], room.path, {
+    // Setup deletion must stop the active install just like it stops git clone.
+    onChild: (child) => cloneJobs.set(room.id, child),
+    timeoutMs: 15 * 60_000,
+  });
+  if (install.exitCode !== 0) {
+    const detail = (install.stderr || install.stdout).trim();
+    throw new Error(`pnpm i failed${detail ? `: ${detail}` : ''}`);
+  }
+}
+
 async function materializeRoom(project: Project, room: Room) {
   try {
     await fs.mkdir(path.dirname(room.path), { recursive: true });
@@ -963,6 +989,7 @@ async function materializeRoom(project: Project, room: Room) {
       const townKeys = await copyGitTownConfig(project.rootPath, room.path).catch((error) => { console.error('devrooms: git-town config carry failed', error); return 0; });
       if (townKeys) console.log(`devrooms: carried ${townKeys} git-town config key(s) into ${room.path}`);
     }
+    await installPnpmDependencies(room);
     room.status = 'idle';
     room.updatedAt = now();
   } catch (error) {

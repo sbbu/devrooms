@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -125,6 +125,17 @@ const src = path.join(root, 'src');
 const remote = path.join(root, 'remote.git');
 const home = path.join(root, 'home');
 const roomsRoot = path.join(root, 'rooms');
+const fakeBin = path.join(root, 'bin');
+const pnpmLog = path.join(root, 'pnpm-invocations.log');
+mkdirSync(fakeBin, { recursive: true });
+writeFileSync(pnpmLog, '');
+writeFileSync(path.join(fakeBin, 'pnpm'), `#!/bin/sh
+printf '%s|%s\\n' "$PWD" "$*" >> "$DEVROOMS_PNPM_LOG"
+case "$PWD" in
+  */pnpm-fail) echo "fixture install failed" >&2; exit 17 ;;
+esac
+`);
+chmodSync(path.join(fakeBin, 'pnpm'), 0o755);
 mkdirSync(src, { recursive: true });
 const srcRoot = realpathSync(src);
 run('git', ['init', '-b', 'main'], src);
@@ -154,7 +165,7 @@ function startServer(extraEnv = {}) {
     cwd: process.cwd(),
     // HOME points at the temp dir so agent-hook installation (which probes
     // ~/.config/opencode) never touches the real home during tests.
-    env: { ...cleanEnv, HOME: home, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot, ...extraEnv },
+    env: { ...cleanEnv, PATH: `${fakeBin}${path.delimiter}${cleanEnv.PATH ?? ''}`, DEVROOMS_PNPM_LOG: pnpmLog, HOME: home, PORT: String(port), DEVROOMS_HOME: home, DEVROOMS_ROOMS_ROOT: roomsRoot, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', (chunk) => { logs += chunk.toString(); });
@@ -200,6 +211,7 @@ try {
   const created = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'alpha' }) });
   if (created.room.status !== 'creating') throw new Error(`expected async room creation, got ${created.room.status}`);
   const room = await waitForRoomStatus(base, 'sample', created.room.id, 'idle');
+  if (readFileSync(pnpmLog, 'utf8') !== '') throw new Error('non-pnpm room unexpectedly ran pnpm i');
   const readme = path.join(roomsRoot, 'sample', 'alpha', 'README.md');
   writeFileSync(readme, 'hello\nworld\n');
 
@@ -281,6 +293,41 @@ try {
   if (!mainTerminalProtected) throw new Error('main terminal must not be closable');
 
   await request(base, `/api/rooms/${room.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
+
+  // A cloned root declaring pnpm stays in "creating" until pnpm i succeeds.
+  writeFileSync(path.join(src, 'package.json'), `${JSON.stringify({ name: 'sample', packageManager: 'pnpm@10.0.0' }, null, 2)}\n`);
+  writeFileSync(path.join(src, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+  run('git', ['add', 'package.json', 'pnpm-lock.yaml'], src);
+  run('git', ['commit', '-m', 'make sample a pnpm project'], src);
+  run('git', ['push', 'origin', 'main'], src);
+  const pnpmCreate = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'pnpm-ok' }) });
+  if (pnpmCreate.room.status !== 'creating') throw new Error(`expected pnpm room setup to start as creating, got ${pnpmCreate.room.status}`);
+  const pnpmRoom = await waitForRoomStatus(base, 'sample', pnpmCreate.room.id, 'idle');
+  const firstPnpmInvocation = readFileSync(pnpmLog, 'utf8').trim();
+  if (firstPnpmInvocation !== `${realpathSync(pnpmRoom.path)}|i`) throw new Error(`pnpm i did not run in cloned room: ${firstPnpmInvocation}`);
+  await request(base, `/api/rooms/${pnpmRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
+
+  // The lockfile fallback also detects pnpm when packageManager is absent, and a
+  // failed install keeps the room out of the usable/idle state.
+  writeFileSync(path.join(src, 'package.json'), `${JSON.stringify({ name: 'sample' }, null, 2)}\n`);
+  run('git', ['add', 'package.json'], src);
+  run('git', ['commit', '-m', 'exercise pnpm lockfile detection'], src);
+  run('git', ['push', 'origin', 'main'], src);
+  const pnpmFailCreate = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'pnpm-fail' }) });
+  const pnpmFailedRoom = await waitForRoomStatus(base, 'sample', pnpmFailCreate.room.id, 'error');
+  if (!pnpmFailedRoom.error?.includes('pnpm i failed: fixture install failed')) throw new Error(`pnpm install failure was not surfaced: ${pnpmFailedRoom.error}`);
+  await request(base, `/api/rooms/${pnpmFailedRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
+
+  // An explicit non-pnpm packageManager wins over a stale pnpm lockfile.
+  const pnpmLogBeforeNpmRoom = readFileSync(pnpmLog, 'utf8');
+  writeFileSync(path.join(src, 'package.json'), `${JSON.stringify({ name: 'sample', packageManager: 'npm@11.0.0' }, null, 2)}\n`);
+  run('git', ['add', 'package.json'], src);
+  run('git', ['commit', '-m', 'declare npm package manager'], src);
+  run('git', ['push', 'origin', 'main'], src);
+  const npmCreate = await request(base, '/api/projects/sample/rooms', { method: 'POST', body: JSON.stringify({ name: 'npm-explicit' }) });
+  const npmRoom = await waitForRoomStatus(base, 'sample', npmCreate.room.id, 'idle');
+  if (readFileSync(pnpmLog, 'utf8') !== pnpmLogBeforeNpmRoom) throw new Error('explicit npm project unexpectedly ran pnpm i');
+  await request(base, `/api/rooms/${npmRoom.id}`, { method: 'DELETE', body: JSON.stringify({ deleteFiles: true }) });
 
   let rejectedBadProject = false;
   try {
