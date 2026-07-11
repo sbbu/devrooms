@@ -505,10 +505,12 @@ function parseStatus(raw: string) {
       const x = line.slice(0, 1);
       const y = line.slice(1, 2);
       const xy = line.slice(0, 2);
+      const { orig, target } = splitRenameEntry(line.slice(3));
       return {
         index: x,
         workingTree: y,
-        path: unquoteGitPath(renameTargetPath(line.slice(3))),
+        path: unquoteGitPath(target),
+        origPath: orig === undefined ? undefined : unquoteGitPath(orig),
         raw: line,
         staged: x !== ' ' && x !== '?',
         dirty: y !== ' ' || line.startsWith('??'),
@@ -632,15 +634,19 @@ async function fileDiff(room: Room, file: string) {
   await assertPathInside(room.path, path.join(room.path, file));
   const status = await runGit(room, ['status', '--porcelain=v1', '--', file]);
   const isUntracked = status.stdout.startsWith('??');
+  // A pathspec limited to a rename's TARGET defeats rename detection (git reports a
+  // full-file add), so include the source path too and git pairs them back up.
+  const orig = isUntracked ? undefined : (await renameSources(room, [file])).get(file);
+  const paths = orig ? [orig, file] : [file];
   const unstaged = isUntracked
     ? await run('git', ['diff', '--no-index', '--', '/dev/null', file], room.path)
-    : await runGit(room, ['diff', '--', file]);
-  const staged = await runGit(room, ['diff', '--cached', '--', file]);
+    : await runGit(room, ['diff', '--', ...paths]);
+  const staged = await runGit(room, ['diff', '--cached', '--', ...paths]);
   // fullDiff = the entire change vs HEAD (staged + unstaged), i.e. exactly what
   // a commit of this file would record. Used by the checkbox-based UI.
   let fullDiff = unstaged.stdout;
   if (!isUntracked) {
-    const full = await runGit(room, ['diff', 'HEAD', '--', file]).catch(() => null);
+    const full = await runGit(room, ['diff', 'HEAD', '--', ...paths]).catch(() => null);
     fullDiff = full ? full.stdout : unstaged.stdout;
   }
   return {
@@ -1766,9 +1772,12 @@ async function main() {
       const meta = await runGit(room, ['show', '-s', '--no-color', `--pretty=format:${fmt}`, hash]);
       const [cHash, short, author, email, date, subject, ...bodyParts] = meta.stdout.split('\x1f');
       const namestat = await runGit(room, ['show', '--no-color', '--name-status', '--pretty=format:', hash]);
+      // Rename/copy lines carry both paths: `R097\told\tnew`. Surface the source so the
+      // client can render `old → new`; name-status quotes specials like porcelain does.
       const files = namestat.stdout.split('\n').filter(Boolean).map((line) => {
         const parts = line.split('\t');
-        return { status: parts[0], path: parts[parts.length - 1] };
+        const origPath = parts.length === 3 ? unquoteGitPath(parts[1]) : undefined;
+        return { status: parts[0], path: unquoteGitPath(parts[parts.length - 1]), origPath };
       });
       res.json({ hash: cHash, short, author, email, date, subject, body: bodyParts.join('\x1f').trimEnd(), files });
     } catch (error) {
@@ -1784,7 +1793,13 @@ async function main() {
       if (!/^[0-9a-fA-F]{4,40}$/.test(hash)) throw new HttpError(400, 'invalid commit hash');
       const file = requireString(req.query.path, 'path');
       await assertPathInside(room.path, path.join(room.path, file));
-      const out = await run('git', ['show', '--no-color', '--pretty=format:', hash, '--', file], room.path);
+      // If <file> is a rename target in this commit, a target-only pathspec would show a
+      // full-file add; find the source from name-status and include it so git pairs them.
+      const namestat = await run('git', ['show', '--no-color', '--name-status', '--pretty=format:', hash], room.path);
+      const entry = namestat.stdout.split('\n').map((line) => line.split('\t'))
+        .find((parts) => parts.length === 3 && unquoteGitPath(parts[2]) === file);
+      const orig = entry ? unquoteGitPath(entry[1]) : undefined;
+      const out = await run('git', ['show', '--no-color', '--pretty=format:', hash, '--', ...(orig ? [orig] : []), file], room.path);
       res.json({ diff: out.stdout });
     } catch (error) {
       apiError(error, res);

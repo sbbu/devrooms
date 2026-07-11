@@ -16,14 +16,14 @@ const MOD_DEL = IS_MAC ? '⌘⌫' : 'Ctrl+⌫';
 
 type Project = { id: string; name: string; repoUrl: string; rootPath?: string };
 type Room = { id: string; projectId: string; name: string; path: string; kind?: 'clone' | 'main'; branch?: string; status: 'creating' | 'idle' | 'error'; error?: string; terminals?: string[]; label?: string };
-type GitFile = { index: string; workingTree: string; path: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
+type GitFile = { index: string; workingTree: string; path: string; origPath?: string; raw: string; staged: boolean; dirty: boolean; unmerged?: boolean; conflicted?: boolean };
 type Branch = { name: string; committedAt: number };
 type GitStatus = { status: { branch: string; files: GitFile[]; raw: string; dirtyCount: number; ahead?: number; behind?: number; hasUpstream?: boolean; unpushedCount?: number; merging?: boolean }; branches: Branch[]; head: string; gitError?: string };
 type GitSummary = { behind: number; unpushed: number; dirty: number; conflict: boolean };
 type GitSummaries = Record<string, GitSummary>;
 type FileDiff = { path: string; diff: string; stagedDiff: string; fullDiff: string; status: string };
 type Commit = { hash: string; short: string; author: string; email: string; date: string; subject: string; unpushed?: boolean };
-type CommitFile = { status: string; path: string };
+type CommitFile = { status: string; path: string; origPath?: string };
 type CommitDetail = Commit & { body: string; files: CommitFile[] };
 type Meta = { name: string; version: string; startedAt: string; uptimeSeconds: number; pid: number; platform: string; node: string; bindHost: string; port: number; home: string; roomsRoot: string; projectCount: number; roomCount: number; processCount: number; runningProcessCount: number };
 
@@ -66,10 +66,16 @@ function projectInitials(name: string) {
 
 const STATUS_GLYPH: Record<Room['status'], string> = { idle: '●', creating: '◐', error: '✕' };
 
+// File-list path cell; a renamed file reads `old → new` with the old side demoted.
+function FilePath({ path, origPath }: { path: string; origPath?: string }) {
+  return <span className="p">{origPath && <span className="ren">{origPath} → </span>}{path}</span>;
+}
+
 function fileGutter(file: GitFile): { ch: string; cls: string } {
   if (file.conflicted) return { ch: '!', cls: 'conflict' };
   if (file.raw.startsWith('??')) return { ch: '?', cls: 'new' };
   if (file.index.trim() && file.workingTree.trim()) return { ch: '±', cls: 'mixed' };
+  if (file.index === 'R' || file.index === 'C') return { ch: 'R', cls: 'staged' };
   if (file.index.trim()) return { ch: 'S', cls: 'staged' };
   if (file.workingTree.trim()) return { ch: 'M', cls: 'modified' };
   return { ch: '•', cls: 'modified' };
@@ -763,7 +769,7 @@ function ChangesView({ room, status, branch, onCommitted }: { room: Room; status
               <div key={file.path} className={selected === file.path ? 'chg-file sel' : 'chg-file'} onClick={() => setSelected(file.path)}>
                 <input type="checkbox" className="ck" checked={!excluded.has(file.path)} onChange={() => toggle(file.path)} onClick={(event) => event.stopPropagation()} />
                 <span className={`g ${gutter.cls}`}>{gutter.ch}</span>
-                <span className="p">{file.path}</span>
+                <FilePath path={file.path} origPath={file.origPath} />
                 {!file.unmerged && <button className="discard-file" title="discard changes" onClick={(event) => { event.stopPropagation(); discardFile(file.path); }}>discard</button>}
               </div>
             );
@@ -891,7 +897,7 @@ function HistoryView({ room, git }: { room: Room; git: GitRoom }) {
                 return (
                   <div key={commitFile.path} className={file === commitFile.path ? 'cd-file sel' : 'cd-file'} onClick={() => setFile(commitFile.path)}>
                     <span className={`g ${cls}`}>{commitFile.status[0]}</span>
-                    <span className="p">{commitFile.path}</span>
+                    <FilePath path={commitFile.path} origPath={commitFile.origPath} />
                   </div>
                 );
               })}

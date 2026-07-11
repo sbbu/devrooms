@@ -348,6 +348,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .g.new, .g.staged { color: var(--green); }
 .g.modified, .g.mixed { color: var(--yellow); }
 .g.del, .g.conflict { color: var(--red); }
+.p .ren { color: var(--dim); }
 
 .chg-commitbox { border-top: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; }
 .chg-commitbox textarea { background: var(--base); border: 1px solid var(--hairline); border-radius: 0; color: var(--fg); font: inherit; padding: 5px 7px; resize: vertical; }
