@@ -439,6 +439,9 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* ── messages / empty states ───────────────────────────────────── */
 .error { border-bottom: 1px solid var(--hairline); color: var(--red); padding: 6px 12px; }
+.error.dismissible { align-items: flex-start; display: flex; gap: 12px; }
+.error.dismissible > span { flex: 1; min-width: 0; }
+.error-dismiss { color: var(--red); flex: none; font-size: 16px; line-height: 1; padding: 1px 0 0 8px; }
 .empty { color: var(--dim); padding: 14px; }
 .empty.clean { color: var(--green); }
 .splash { align-items: center; color: var(--dim); display: flex; flex: 1; flex-direction: column; gap: 6px; justify-content: center; text-align: center; }

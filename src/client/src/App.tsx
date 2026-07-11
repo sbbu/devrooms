@@ -1857,7 +1857,12 @@ export function App() {
           </div>
           {selectedRoom?.status === 'idle' && <GitFeedback git={git} />}
 
-          {error && <div className="error">{error}</div>}
+          {error && (
+            <div className="error dismissible" role="alert">
+              <span>{error}</span>
+              <button className="error-dismiss" type="button" aria-label="Dismiss error" title="dismiss error" onClick={() => setError(null)}>×</button>
+            </div>
+          )}
           {!selectedRoom && <div className="splash"><strong>no room selected</strong><span>create a project from a local repo for a main room, or clone a separate room</span></div>}
           {selectedRoom && selectedRoom.status !== 'idle' && (
             <div className={`splash room-state ${selectedRoom.status}`}>
