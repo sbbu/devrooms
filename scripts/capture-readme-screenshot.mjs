@@ -191,14 +191,19 @@ async function api(base, route, options = {}) {
 }
 
 async function waitForRoom(base, projectId, roomId) {
-  for (let i = 0; i < 160; i++) {
+  // Clone setup may install a full pnpm workspace and the daemon allows that
+  // install 15 minutes. Keep the showcase waiter alive for the same operation.
+  const deadline = Date.now() + 16 * 60_000;
+  let lastStatus = 'missing';
+  while (Date.now() < deadline) {
     const data = await api(base, `/api/projects/${projectId}/rooms`);
     const room = data.rooms.find((item) => item.id === roomId);
+    lastStatus = room?.status ?? 'missing';
     if (room?.status === 'idle') return room;
     if (room?.status === 'error') throw new Error(`room ${roomId} failed: ${room.error}`);
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  throw new Error(`room ${roomId} did not become idle`);
+  throw new Error(`room ${roomId} did not become idle (last status: ${lastStatus})`);
 }
 
 async function setupDevroomsState(base, repos) {
